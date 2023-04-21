@@ -5,7 +5,7 @@ data Modality
     | Relevant
     | Affine
     | Linear
-    deriving (Eq, Show)
+    deriving (Eq, Show, Ord)
 
 more :: Modality -> Modality -> Bool
 more Linear Affine = True

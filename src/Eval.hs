@@ -24,7 +24,7 @@ data AST = AST ConstructorMap [ValueDefinition] deriving (Eq, Show)
 
 data ValueDefinition
   = TypeAnnotation Name Type
-  | NameDefinition Name Expr
+  | NameDefinition Name (Expr Type) 
   deriving (Eq, Show)
 
 data Value
@@ -67,7 +67,7 @@ integerClosure f = Closure $ \v1 -> Closure $ \v2 ->
         (LitVal (IntegerLiteral int1), LitVal (IntegerLiteral int2)) -> LitVal $ IntegerLiteral (f int1 int2)
         _ -> error "Not two int"
 
-matchValues :: Value -> [(Pattern, Expr)] -> ConstructorMap -> Maybe ([(Name, Value)], Expr)
+matchValues :: Value -> [(Pattern, Expr Type)] -> ConstructorMap -> Maybe ([(Name, Value)], Expr Type)
 matchValues _ ((Default, expr) : rest) _ = Just ([], expr)
 matchValues val ((LiteralPattern lit, expr) : rest) constructs =
     if val == LitVal lit then Just ([], expr)
@@ -77,7 +77,7 @@ matchValues val@(Constructor nameConst vals) ((ConstructorPattern namePat names,
     else matchValues val rest constructs
 matchValues _ _ _ = Nothing
 
-eval :: Expr -> AST -> Env -> Maybe Value
+eval :: Expr Type -> AST -> Env -> Maybe Value
 eval (LitExpr lit) _ _ = Just $ LitVal lit
 eval (LambdaExpr arg _ _ expr) ast env = pure . Closure $ \v -> v `deepseq` fromJust $ eval expr ast (insert arg v env)
 eval (ApplyExpr f x) ast env = do

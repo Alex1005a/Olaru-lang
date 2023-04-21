@@ -1,107 +1,207 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module TypeCheck where
-import Data.Map (Map, fromList, insert, empty, findWithDefault, singleton, union, lookup)
+import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Types
 import Algebra (Modality (Unrestricted, Linear, Affine, Relevant), mult, more)
 import Control.Monad (zipWithM, when, unless)
 import Expressions
-import Prelude hiding (lookup)
 import Control.Applicative ((<|>))
+import Control.Monad.Except
+import Control.Monad.State
+import Data.List (nub)
+import Prelude hiding (foldr)
+import Data.Foldable (foldr)
 
-type EnvType = Map Name Type
+data Scheme = Forall [TypeVarName] Type
+  deriving (Show, Eq, Ord)
 
-type LocalEnvType = Map Name (Type, Modality)
+
+newtype TypeEnv = TypeEnv (Map.Map Name (Modality, Scheme))
+  deriving (Semigroup, Monoid)
+
+data Unique = Unique { count :: Int }
+
+type Infer = ExceptT TypeError (State Unique)
+type Subst = Map.Map TypeVarName Type
 
 data TypeError
-  = TypeMismatch Type Type
-  | UnboundName Name
-  deriving (Eq, Show)
+  = UnificationFail Type Type
+  | InfiniteType TypeVarName Type
+  | UnboundVariable String
+  deriving (Show, Eq)
 
-prims :: EnvType
-prims = fromList
-    [
-        ("plus", (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
-        ("mult", (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
-        ("minus", (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)
-    ]
+runInfer :: Infer (Subst, Type) -> Either TypeError Scheme
+runInfer m = case evalState (runExceptT m) initUnique of
+  Left err  -> Left err
+  Right res -> Right $ closeOver res
 
-zipNamesWithTypes :: Type -> [Name] -> Maybe (LocalEnvType, Type)
-zipNamesWithTypes ((m, argTy) :-> retTy) (name : rest) = do
-    (restLocEnv, ty) <- zipNamesWithTypes retTy rest
-    pure (insert name (argTy, m) restLocEnv, ty)
-zipNamesWithTypes ty [] = case ty of
-    (_ :-> _) -> Nothing
-    _ -> Just (empty, ty)
-zipNamesWithTypes _ _ = Nothing
+closeOver :: (Map.Map TypeVarName Type, Type) -> Scheme
+closeOver (sub, ty) = normalize sc
+  where sc = generalize emptyTyenv (apply sub ty)
 
-subst :: Type -> Map Name Type -> Type
-subst ty@(TypeVar name) substEnv = findWithDefault ty name substEnv
-subst (CustomType n args) substEnv =
-    CustomType n $ fmap (`subst` substEnv) args
-subst ((m, ty) :-> ret) substEnv = (m, subst ty substEnv) :-> subst ret substEnv
-subst other _ = other
+initUnique :: Unique
+initUnique = Unique { count = 0 }
 
-makeSubstMap :: Type -> Type -> Maybe (Map Name Type)
-makeSubstMap (TypeVar name) ty = pure $ singleton name ty
-makeSubstMap (CustomType n args) (CustomType name substArgs) =
-    if n /= name then Nothing else do
-        substMaps <- zipWithM makeSubstMap args substArgs
-        pure $ foldr union empty substMaps
-makeSubstMap ((m1, argTy) :-> ret) ((m2, argTy1) :-> ret1) = do
-    if m1 /= m2 then Nothing else do
-        argSubstMap <- makeSubstMap argTy argTy1
-        retSubstMap <- makeSubstMap ret ret1
-        pure $ union argSubstMap retSubstMap
-makeSubstMap (PrimType primTy) (PrimType ty) =
-    if ty == primTy then pure empty else Nothing
-makeSubstMap _ (TypeVar _) = pure empty
-makeSubstMap _ _ = Nothing
+extend :: TypeEnv -> (TypeVarName, Modality, Scheme) -> TypeEnv
+extend (TypeEnv env) (x, m, s) = TypeEnv $ Map.insert x (m, s) env
 
-typeCheckPattern :: Type -> (Pattern, Expr) -> Modality -> EnvType -> LocalEnvType -> Maybe (Type, [Name])
-typeCheckPattern _ (Default, expr) m env localEnv = typeCheck expr m env localEnv
-typeCheckPattern (PrimType IntegerType) (LiteralPattern (IntegerLiteral _), expr) m env localEnv = typeCheck expr m env localEnv
-typeCheckPattern (PrimType CharType) (LiteralPattern (CharLiteral _), expr) m env localEnv = typeCheck expr m env localEnv
-typeCheckPattern (CustomType name typeArgs) (ConstructorPattern conName args, expr) m env localEnv = do
-    conType <- lookup conName env
-    (CustomType tyName oldArgs) <- pure $ retType conType
-    when (tyName /= name) Nothing
-    maps <- zipWithM makeSubstMap oldArgs typeArgs
-    let substMapForCon = foldr union empty maps
-    (vars, _) <- zipNamesWithTypes (subst conType substMapForCon) args
-    typeCheck expr m env (vars `union` localEnv)
-typeCheckPattern _ _ _ _ _ = Nothing
+emptyTyenv :: TypeEnv
+emptyTyenv = TypeEnv Map.empty
 
-typeCheckPatterns :: Type -> [(Pattern, Expr)] -> Modality -> EnvType -> LocalEnvType -> Maybe (Type, [Name])
-typeCheckPatterns ty [casePat] m env localEnv = typeCheckPattern ty casePat m env localEnv
-typeCheckPatterns ty (casePat : rest) m env localEnv = do
-    retTy <- typeCheckPattern ty casePat m env localEnv
-    restTy <- typeCheckPatterns ty rest m env localEnv
-    if fst retTy == fst restTy then Just retTy else Nothing
-typeCheckPatterns _ _ _ _ _ = Nothing
+typeof :: TypeEnv -> TypeVarName -> Maybe (Modality, Scheme)
+typeof (TypeEnv env) name = Map.lookup name env
 
-typeCheck :: Expr -> Modality -> EnvType -> LocalEnvType -> Maybe (Type, [Name])
-typeCheck (LitExpr lit) _ _ _ = case lit of
-    IntegerLiteral _ -> Just (PrimType IntegerType, [])
-    CharLiteral _ -> Just (PrimType CharType, [])
-typeCheck (ApplyExpr expr arg) m env localEnv = do
-    ((argModality, argTy) :-> ret, usageExpr) <- typeCheck expr m env localEnv
-    (argType, usageArg) <- typeCheck arg (mult argModality m) env localEnv
-    newRetTy <- subst ret <$> makeSubstMap argTy argType
-    Just (newRetTy, usageArg ++ usageExpr)
-typeCheck (LambdaExpr arg argType m expr) _ env localEnv = do
-    (retTy, usage) <- typeCheck expr Linear env (insert arg (argType, m) localEnv)
-    let countUsage = length $ filter (== arg) usage
-    case m of
-      Unrestricted -> pure ()
-      Linear -> when (countUsage /= 1) Nothing
-      Affine -> when (countUsage > 1) Nothing
-      Relevant -> when (countUsage == 0) Nothing
-    Just ((m, argType) :-> retTy, usage)
-typeCheck (CaseExpr expr patterns) ts env localEnv = do
-    (ty, usage) <- typeCheck expr ts env localEnv
-    (\(retTy, us) -> (retTy , us ++ usage)) <$> typeCheckPatterns ty patterns ts env localEnv
-typeCheck (NameExpr name) ts env localEnv = (do
-        (ty, nameTS) <- lookup name localEnv
-        unless (more ts nameTS) Nothing
-        pure (ty, [name]))
-    <|> fmap (, []) (lookup name env)
+class Substitutable a where
+  apply :: Subst -> a -> a
+  ftv   :: a -> Set.Set TypeVarName
+
+instance Substitutable Type where
+  apply s t@(TypeVar a)     = Map.findWithDefault t a s
+  apply s ((m, t1) :-> t2) = (m, apply s t1) :-> apply s t2
+  apply _ a       = a
+
+  ftv (TypeVar a)       = Set.singleton a
+  ftv ((_, t1) :-> t2) = ftv t1 `Set.union` ftv t2
+  ftv _        = Set.empty
+
+instance Substitutable Scheme where
+  apply s (Forall as t)   = Forall as $ apply s' t
+                            where s' = foldr Map.delete s as
+  ftv (Forall as t) = ftv t `Set.difference` Set.fromList as
+
+instance Substitutable a => Substitutable [a] where
+  apply = fmap . apply
+  ftv   = foldr (Set.union . ftv) Set.empty
+
+instance Substitutable TypeEnv where
+  apply s (TypeEnv env) =  TypeEnv $ Map.map (\(m, ty) -> (m, apply s ty)) env
+  ftv (TypeEnv env) = ftv $ Map.elems $ Map.map snd env
+
+
+nullSubst :: Subst
+nullSubst = Map.empty
+
+compose :: Subst -> Subst -> Subst
+s1 `compose` s2 = Map.map (apply s1) s2 `Map.union` s1
+
+unify ::  Type -> Type -> Infer Subst
+unify ((m, l) :-> r) ((m', l') :-> r')  = do
+  s1 <- unify l l'
+  s2 <- unify (apply s1 r) (apply s1 r')
+  return (s2 `compose` s1)
+
+unify (TypeVar a) t = bind a t
+unify t (TypeVar a) = bind a t
+unify a b | a == b = return nullSubst
+unify t1 t2 = throwError $ UnificationFail t1 t2
+
+bind ::  TypeVarName -> Type -> Infer Subst
+bind a t
+  | t == TypeVar a     = return nullSubst
+  | occursCheck a t = throwError $ InfiniteType a t
+  | otherwise       = return $ Map.singleton a t
+
+occursCheck ::  Substitutable a => TypeVarName -> a -> Bool
+occursCheck a t = a `Set.member` ftv t
+
+letters :: [String]
+letters = [1..] >>= flip replicateM ['a'..'z']
+
+fresh :: Infer Type
+fresh = do
+  s <- get
+  put s{count = count s + 1}
+  return $ TypeVar (letters !! count s)
+
+instantiate ::  Scheme -> Infer Type
+instantiate (Forall as t) = do
+  as' <- mapM (const fresh) as
+  let s = Map.fromList $ zip as as'
+  return $ apply s t
+
+generalize :: TypeEnv -> Type -> Scheme
+generalize env t  = Forall as t
+  where as = Set.toList $ ftv t `Set.difference` ftv env
+
+prims :: Name -> Maybe Type
+prims name = case name of
+    "plus" -> pure $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType
+    "mult" -> pure $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType
+    "minus" -> pure $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType
+    _ -> Nothing
+
+lookupEnv :: TypeEnv -> Name -> Infer (Modality, Type)
+lookupEnv (TypeEnv env) x =
+  case Map.lookup x env of
+    Nothing -> throwError $ UnboundVariable (show x)
+    Just (m, s)  -> 
+               do t <- instantiate s
+                  return (m, t)
+
+infer :: TypeEnv -> Modality -> Expr () -> Infer (Subst, Type)
+infer env m ex = case ex of
+  NameExpr x ->
+    case prims x of
+      Just t -> return (nullSubst, t)
+      Nothing -> do
+        (modal, t) <- lookupEnv env x
+        unless (more modal m) $ error "incorrect context"
+        return (nullSubst, t)
+
+  LambdaExpr x _ argM e -> do
+    tv <- fresh
+    let env' = env `extend` (x, m, Forall [] tv)
+    (s1, t1) <- infer env' argM e
+    return (s1, (argM, apply s1 tv) :-> t1)
+
+  ApplyExpr e1 e2 -> do
+    tv <- fresh
+    (s1, t1) <- infer env m e1
+    case t1 of
+      ((argM, _) :-> _) -> do
+        (s2, t2) <- infer (apply s1 env) (mult argM m) e2
+        s3       <- unify (apply s2 t1) ((argM, t2) :-> tv)
+        return (s3 `compose` s2 `compose` s1, apply s3 tv)
+      _ -> error "err"
+
+  LitExpr (IntegerLiteral _)  -> return (nullSubst, PrimType IntegerType)
+  LitExpr (CharLiteral _) -> return (nullSubst, PrimType CharType)
+
+inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
+inferExpr env = runInfer . infer env Linear
+{-
+inferPrim :: TypeEnv -> [Expr ()] -> Type -> Infer (Subst, Type)
+inferPrim env l t = do
+  tv <- fresh
+  (s1, tf) <- foldM inferStep (nullSubst, id) l
+  s2 <- unify (apply s1 (tf tv)) t
+  return (s2 `compose` s1, apply s2 tv)
+  where
+  inferStep (s, tf) exp = do
+    (s', t) <- infer (apply s env) Linear exp
+    return (s' `compose` s, tf . ((undefined, t) :->))
+
+inferTop :: TypeEnv -> [(String, Expr ())] -> Either TypeError TypeEnv
+inferTop env [] = Right env
+inferTop env ((name, ex):xs) = case inferExpr env ex of
+  Left err -> Left err
+  Right ty -> inferTop (extend env (name, ty)) xs
+-}
+normalize :: Scheme -> Scheme
+normalize (Forall ts body) = Forall (fmap snd ord) (normtype body)
+  where
+    ord = zip (nub $ fv body) letters
+
+    fv (TypeVar a)   = [a]
+    fv ((_, a) :-> b) = fv a ++ fv b
+    fv _   = []
+
+    normtype ((m, a) :-> b) = (m, normtype a) :-> (normtype b)
+    normtype (TypeVar a)   =
+      case lookup a ord of
+        Just x -> TypeVar x
+        Nothing -> error "type variable not in signature"
+    normtype a = a

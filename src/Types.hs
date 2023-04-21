@@ -25,4 +25,4 @@ data Type
     | PrimType PrimType
     | CustomType TypeName [Type]
     | TypeVar TypeVarName
-    deriving (Eq, Show)
+    deriving (Eq, Show, Ord)
