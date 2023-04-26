@@ -10,7 +10,7 @@ import Prelude hiding (lookup)
 import Data.Maybe (fromJust)
 import Control.Applicative ((<|>))
 
-data ConstructorInfo = ConstructorInfo
+newtype ConstructorInfo = ConstructorInfo
   {
     constructorType :: Type
   } deriving (Eq, Show)

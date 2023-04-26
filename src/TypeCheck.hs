@@ -5,24 +5,22 @@ module TypeCheck where
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Types
-import Algebra (Modality (Unrestricted, Linear, Affine, Relevant), mult, more)
-import Control.Monad (zipWithM, when, unless)
+import Algebra
 import Expressions
-import Control.Applicative ((<|>))
 import Control.Monad.Except
 import Control.Monad.State
 import Data.List (nub)
 import Prelude hiding (foldr)
-import Data.Foldable (foldr)
+import Data.Foldable (foldr, foldrM)
 
 data Scheme = Forall [TypeVarName] Type
   deriving (Show, Eq, Ord)
 
 
-newtype TypeEnv = TypeEnv (Map.Map Name (Modality, Scheme))
+newtype TypeEnv = TypeEnv (Map.Map Name Scheme)
   deriving (Semigroup, Monoid)
 
-data Unique = Unique { count :: Int }
+newtype Unique = Unique { count :: Int }
 
 type Infer = ExceptT TypeError (State Unique)
 type Subst = Map.Map TypeVarName Type
@@ -34,6 +32,7 @@ data TypeError
   | ApplicationToNonFunction
   | IncorrectModalityContext Name Modality Modality
   | UsageModality Name Modality Int
+  | InconsistentUsage Name
   deriving (Show, Eq)
 
 runInfer :: Infer (Subst, Type) -> Either TypeError Scheme
@@ -48,13 +47,13 @@ closeOver (sub, ty) = normalize sc
 initUnique :: Unique
 initUnique = Unique { count = 0 }
 
-extend :: TypeEnv -> (TypeVarName, Modality, Scheme) -> TypeEnv
-extend (TypeEnv env) (x, m, s) = TypeEnv $ Map.insert x (m, s) env
+extend :: TypeEnv -> (TypeVarName, Scheme) -> TypeEnv
+extend (TypeEnv env) (x, s) = TypeEnv $ Map.insert x s env
 
 emptyTyenv :: TypeEnv
 emptyTyenv = TypeEnv Map.empty
 
-typeof :: TypeEnv -> TypeVarName -> Maybe (Modality, Scheme)
+typeof :: TypeEnv -> TypeVarName -> Maybe Scheme
 typeof (TypeEnv env) name = Map.lookup name env
 
 class Substitutable a where
@@ -80,8 +79,8 @@ instance Substitutable a => Substitutable [a] where
   ftv   = foldr (Set.union . ftv) Set.empty
 
 instance Substitutable TypeEnv where
-  apply s (TypeEnv env) =  TypeEnv $ Map.map (\(m, ty) -> (m, apply s ty)) env
-  ftv (TypeEnv env) = ftv $ Map.elems $ Map.map snd env
+  apply s (TypeEnv env) =  TypeEnv $ Map.map (apply s) env
+  ftv (TypeEnv env) = ftv $ Map.elems env
 
 
 nullSubst :: Subst
@@ -90,22 +89,21 @@ nullSubst = Map.empty
 compose :: Subst -> Subst -> Subst
 s1 `compose` s2 = Map.map (apply s1) s2 `Map.union` s1
 
-unify ::  Type -> Type -> Infer Subst
-unify ((m, l) :-> r) ((m', l') :-> r')  = do
+unify :: Type -> Type -> Infer Subst
+unify ((m, l) :-> r) ((m', l') :-> r') | m == m' = do
   s1 <- unify l l'
   s2 <- unify (apply s1 r) (apply s1 r')
-  return (s2 `compose` s1)
-
+  pure (s2 `compose` s1)
 unify (TypeVar a) t = bind a t
 unify t (TypeVar a) = bind a t
-unify a b | a == b = return nullSubst
+unify a b | a == b = pure nullSubst
 unify t1 t2 = throwError $ UnificationFail t1 t2
 
 bind ::  TypeVarName -> Type -> Infer Subst
 bind a t
-  | t == TypeVar a     = return nullSubst
+  | t == TypeVar a     = pure nullSubst
   | occursCheck a t = throwError $ InfiniteType a t
-  | otherwise       = return $ Map.singleton a t
+  | otherwise       = pure $ Map.singleton a t
 
 occursCheck ::  Substitutable a => TypeVarName -> a -> Bool
 occursCheck a t = a `Set.member` ftv t
@@ -117,13 +115,13 @@ fresh :: Infer Type
 fresh = do
   s <- get
   put s{count = count s + 1}
-  return $ TypeVar (letters !! count s)
+  pure $ TypeVar (letters !! count s)
 
 instantiate ::  Scheme -> Infer Type
 instantiate (Forall as t) = do
   as' <- mapM (const fresh) as
   let s = Map.fromList $ zip as as'
-  return $ apply s t
+  pure $ apply s t
 
 generalize :: TypeEnv -> Type -> Scheme
 generalize env t  = Forall as t
@@ -132,54 +130,75 @@ generalize env t  = Forall as t
 prims :: TypeEnv
 prims = TypeEnv $ Map.fromList
   [
-    ("plus", (Unrestricted, Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)),
-    ("mult", (Unrestricted, Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)),
-    ("minus", (Unrestricted, Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType))
+    ("plus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
+    ("mult", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
+    ("minus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)
   ]
 
-lookupEnv :: TypeEnv -> Name -> Infer (Modality, Type)
-lookupEnv (TypeEnv env) x =
+lookupEnv :: TypeEnv -> Name -> Infer (Subst, Type)
+lookupEnv (TypeEnv env) x = do
   case Map.lookup x env of
     Nothing -> throwError $ UnboundVariable (show x)
-    Just (m, s) -> do
-      t <- instantiate s
-      return (m, t)
+    Just s  -> do t <- instantiate s
+                  pure (nullSubst, t)
 
 litType :: Literal -> Type
 litType (IntegerLiteral _) = PrimType IntegerType
 litType (CharLiteral _) = PrimType CharType
 
-infer :: TypeEnv -> Modality -> Expr () -> Infer (Subst, Type)
-infer env m ex = case ex of
-  NameExpr x -> do
-    (modal, t) <- lookupEnv env x
-    --unless (more modal m) $ error "incorrect context"
-    return (nullSubst, t)
+infer :: TypeEnv -> Expr () -> Infer (Subst, Type)
+infer env ex = case ex of
+  NameExpr x -> lookupEnv env x
 
   LambdaExpr x _ argM e -> do
     tv <- fresh
-    let env' = env `extend` (x, m, Forall [] tv)
-    (s1, t1) <- infer env' argM e
-    return (s1, (argM, apply s1 tv) :-> t1)
+    let env' = env `extend` (x, Forall [] tv)
+    (s1, t1) <- infer env' e
+    pure (s1, (argM, apply s1 tv) :-> t1)
 
   ApplyExpr e1 e2 -> do
     tv <- fresh
-    (s1, t1) <- infer env m e1
+    (s1, t1) <- infer env e1
     case t1 of
       ((argM, _) :-> _) -> do
-        (s2, t2) <- infer (apply s1 env) (mult argM m) e2
+        (s2, t2) <- infer (apply s1 env) e2
         s3       <- unify (apply s2 t1) ((argM, t2) :-> tv)
-        return (s3 `compose` s2 `compose` s1, apply s3 tv)
+        pure (s3 `compose` s2 `compose` s1, apply s3 tv)
       _ -> throwError ApplicationToNonFunction
 
   CaseExpr expr patterns -> do
-    r <- infer env m expr
-    undefined
+    (s, patTy) <- infer env expr
+    casesInfer <- forM patterns (inferPatternDef (apply s patTy) (apply s env))
+    tv <- fresh
+    foldrM (\(s2, caseTy) (s1, ty) -> do
+          subtTy <- unify ty caseTy
+          pure (s1 `compose` s2 `compose` subtTy, apply subtTy caseTy)
+        ) (nullSubst, tv) casesInfer
 
-  LitExpr l  -> return (nullSubst, litType l)
+  LitExpr l  -> pure (nullSubst, litType l)
+
+inferPatternDef :: Type -> TypeEnv -> (Pattern, Expr ()) -> Infer (Subst, Type)
+inferPatternDef scrutinee env (pat, caseExpr) = do
+  (newEnv, ty) <- inspectPattern scrutinee env pat
+  s <- unify ty scrutinee
+  infer (apply s newEnv) caseExpr
+
+inspectPattern :: Type -> TypeEnv -> Pattern -> Infer (TypeEnv, Type)
+inspectPattern scrutinee env pat = case pat of
+  Default -> pure (env, scrutinee)
+  LiteralPattern lit -> pure (env, litType lit)
+  ConstructorPattern conName pats -> do
+    (_, conTy) <- lookupEnv env conName
+    pure $ zipWithNames env conTy pats
+
+zipWithNames :: TypeEnv -> Type -> [Name] -> (TypeEnv, Type)
+zipWithNames env ((_, argTy) :-> retTy) (name : restNames) =
+  zipWithNames (env `extend` (name, Forall [] argTy)) retTy restNames
+zipWithNames env ty [] = (env, ty)
+zipWithNames _ _ _ = error "zipWithNames: args len too short"
 
 inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
-inferExpr env = runInfer . infer env Linear
+inferExpr env = runInfer . infer env
 
 {-
 inferPrim :: TypeEnv -> [Expr ()] -> Type -> Infer (Subst, Type)
@@ -187,11 +206,11 @@ inferPrim env l t = do
   tv <- fresh
   (s1, tf) <- foldM inferStep (nullSubst, id) l
   s2 <- unify (apply s1 (tf tv)) t
-  return (s2 `compose` s1, apply s2 tv)
+  pure (s2 `compose` s1, apply s2 tv)
   where
   inferStep (s, tf) exp = do
     (s', t) <- infer (apply s env) Linear exp
-    return (s' `compose` s, tf . ((undefined, t) :->))
+    pure (s' `compose` s, tf . ((undefined, t) :->))
 
 inferTop :: TypeEnv -> [(String, Expr ())] -> Either TypeError TypeEnv
 inferTop env [] = Right env

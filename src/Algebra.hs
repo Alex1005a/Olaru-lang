@@ -5,9 +5,11 @@ data Modality
     | Relevant
     | Affine
     | Linear
+    | Zero
     deriving (Eq, Show, Ord)
 
 more :: Modality -> Modality -> Bool
+more Zero _ = True
 more Linear Affine = True
 more Linear Relevant = True
 more _ Unrestricted = True
@@ -22,3 +24,5 @@ mult Affine Affine = Affine
 mult Relevant Relevant = Relevant
 mult Relevant Affine = Unrestricted
 mult Affine Relevant = Unrestricted
+mult Zero _ = Zero
+mult _ Zero = Zero
