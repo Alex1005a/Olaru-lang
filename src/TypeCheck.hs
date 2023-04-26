@@ -31,6 +31,9 @@ data TypeError
   = UnificationFail Type Type
   | InfiniteType TypeVarName Type
   | UnboundVariable String
+  | ApplicationToNonFunction
+  | IncorrectModalityContext Name Modality Modality
+  | UsageModality Name Modality Int
   deriving (Show, Eq)
 
 runInfer :: Infer (Subst, Type) -> Either TypeError Scheme
@@ -126,30 +129,32 @@ generalize :: TypeEnv -> Type -> Scheme
 generalize env t  = Forall as t
   where as = Set.toList $ ftv t `Set.difference` ftv env
 
-prims :: Name -> Maybe Type
-prims name = case name of
-    "plus" -> pure $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType
-    "mult" -> pure $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType
-    "minus" -> pure $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType
-    _ -> Nothing
+prims :: TypeEnv
+prims = TypeEnv $ Map.fromList
+  [
+    ("plus", (Unrestricted, Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)),
+    ("mult", (Unrestricted, Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)),
+    ("minus", (Unrestricted, Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType))
+  ]
 
 lookupEnv :: TypeEnv -> Name -> Infer (Modality, Type)
 lookupEnv (TypeEnv env) x =
   case Map.lookup x env of
     Nothing -> throwError $ UnboundVariable (show x)
-    Just (m, s)  -> 
-               do t <- instantiate s
-                  return (m, t)
+    Just (m, s) -> do
+      t <- instantiate s
+      return (m, t)
+
+litType :: Literal -> Type
+litType (IntegerLiteral _) = PrimType IntegerType
+litType (CharLiteral _) = PrimType CharType
 
 infer :: TypeEnv -> Modality -> Expr () -> Infer (Subst, Type)
 infer env m ex = case ex of
-  NameExpr x ->
-    case prims x of
-      Just t -> return (nullSubst, t)
-      Nothing -> do
-        (modal, t) <- lookupEnv env x
-        unless (more modal m) $ error "incorrect context"
-        return (nullSubst, t)
+  NameExpr x -> do
+    (modal, t) <- lookupEnv env x
+    --unless (more modal m) $ error "incorrect context"
+    return (nullSubst, t)
 
   LambdaExpr x _ argM e -> do
     tv <- fresh
@@ -165,13 +170,17 @@ infer env m ex = case ex of
         (s2, t2) <- infer (apply s1 env) (mult argM m) e2
         s3       <- unify (apply s2 t1) ((argM, t2) :-> tv)
         return (s3 `compose` s2 `compose` s1, apply s3 tv)
-      _ -> error "err"
+      _ -> throwError ApplicationToNonFunction
 
-  LitExpr (IntegerLiteral _)  -> return (nullSubst, PrimType IntegerType)
-  LitExpr (CharLiteral _) -> return (nullSubst, PrimType CharType)
+  CaseExpr expr patterns -> do
+    r <- infer env m expr
+    undefined
+
+  LitExpr l  -> return (nullSubst, litType l)
 
 inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
 inferExpr env = runInfer . infer env Linear
+
 {-
 inferPrim :: TypeEnv -> [Expr ()] -> Type -> Infer (Subst, Type)
 inferPrim env l t = do
@@ -199,7 +208,7 @@ normalize (Forall ts body) = Forall (fmap snd ord) (normtype body)
     fv ((_, a) :-> b) = fv a ++ fv b
     fv _   = []
 
-    normtype ((m, a) :-> b) = (m, normtype a) :-> (normtype b)
+    normtype ((m, a) :-> b) = (m, normtype a) :-> normtype b
     normtype (TypeVar a)   =
       case lookup a ord of
         Just x -> TypeVar x

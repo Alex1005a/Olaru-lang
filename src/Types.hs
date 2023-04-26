@@ -13,6 +13,10 @@ retType :: Type -> Type
 retType (_ :-> t) = retType t
 retType t = t
 
+funArgs :: Type -> [(Type, Modality)]
+funArgs ((m, argTy) :-> retTy) = (argTy, m) : funArgs retTy
+funArgs _ = []
+
 data PrimType
     = IntegerType
     | CharType

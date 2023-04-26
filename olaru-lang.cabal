@@ -24,6 +24,7 @@ library
       Algebra
       Eval
       Expressions
+      ModalCheck
       TypeCheck
       Types
   other-modules:
