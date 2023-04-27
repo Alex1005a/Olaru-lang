@@ -13,7 +13,6 @@ import Control.Monad.State
 import Data.List (nub)
 import Prelude hiding (foldr)
 import Data.Foldable (foldr, foldrM)
-import Debug.Trace (trace)
 
 data Scheme = Forall [TypeVarName] Type
   deriving (Show, Eq, Ord)
@@ -156,6 +155,10 @@ litType :: Literal -> Type
 litType (IntegerLiteral _) = PrimType IntegerType
 litType (CharLiteral _) = PrimType CharType
 
+argModality :: Type -> Modality
+argModality ((m, _) :-> _) = m
+argModality _ = Unrestricted
+
 infer :: TypeEnv -> Expr () -> Infer (Subst, Type)
 infer env ex = case ex of
   NameExpr x -> lookupEnv env x
@@ -169,12 +172,9 @@ infer env ex = case ex of
   ApplyExpr e1 e2 -> do
     tv <- fresh
     (s1, t1) <- infer env e1
-    case t1 of
-      ((argM, _) :-> _) -> do
-        (s2, t2) <- infer (apply s1 env) e2
-        s3       <- unify (apply s2 t1) ((argM, t2) :-> tv)
-        pure (s3 `compose` s2 `compose` s1, apply s3 tv)
-      _ -> throwError ApplicationToNonFunction
+    (s2, t2) <- infer (apply s1 env) e2
+    s3       <- unify (apply s2 t1) ((argModality t2, t2) :-> tv)
+    return (s3 `compose` s2 `compose` s1, apply s3 tv)
 
   CaseExpr expr patterns -> do
     (s, patTy) <- infer env expr
