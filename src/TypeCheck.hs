@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TupleSections #-}
 module TypeCheck where
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -63,6 +64,7 @@ class Substitutable a where
 instance Substitutable Type where
   apply s t@(TypeVar a)     = Map.findWithDefault t a s
   apply s ((m, t1) :-> t2) = (m, apply s t1) :-> apply s t2
+  apply sub (CustomType name ts) = CustomType name (map (apply sub) ts)
   apply _ a       = a
 
   ftv (TypeVar a)       = Set.singleton a
@@ -96,6 +98,13 @@ unify ((m, l) :-> r) ((m', l') :-> r') | m == m' = do
   pure (s2 `compose` s1)
 unify (TypeVar a) t = bind a t
 unify t (TypeVar a) = bind a t
+unify (CustomType name1 ts1) (CustomType name2 ts2)
+  | name1 == name2 && length ts1 == length ts2 =
+    let together = zip ts1 ts2
+        go acc (t1, t2) = do
+          su <- unify (apply acc t1) (apply acc t2)
+          return (su <> acc)
+     in foldM go mempty together
 unify a b | a == b = pure nullSubst
 unify t1 t2 = throwError $ UnificationFail t1 t2
 
@@ -172,20 +181,21 @@ infer env ex = case ex of
     tv <- fresh
     foldrM (\(s2, caseTy) (s1, ty) -> do
           subtTy <- unify ty caseTy
-          pure (s1 `compose` s2 `compose` subtTy, apply subtTy caseTy)
+          pure (s1 `compose` s2 `compose` subtTy, apply subtTy ty)
         ) (nullSubst, tv) casesInfer
 
   LitExpr l  -> pure (nullSubst, litType l)
 
 inferPatternDef :: Type -> TypeEnv -> (Pattern, Expr ()) -> Infer (Subst, Type)
 inferPatternDef scrutinee env (pat, caseExpr) = do
-  (newEnv, ty) <- inspectPattern scrutinee env pat
-  s <- unify ty scrutinee
-  infer (apply s newEnv) caseExpr
+  (newEnv, ty) <- inspectPattern env pat
+  (s1, retTy) <- infer newEnv caseExpr
+  s2 <- unify (apply s1 ty) scrutinee
+  pure (s2 `compose` s1, apply s1 retTy)
 
-inspectPattern :: Type -> TypeEnv -> Pattern -> Infer (TypeEnv, Type)
-inspectPattern scrutinee env pat = case pat of
-  Default -> pure (env, scrutinee)
+inspectPattern :: TypeEnv -> Pattern -> Infer (TypeEnv, Type)
+inspectPattern env pat = case pat of
+  Default -> (env,) <$> fresh
   LiteralPattern lit -> pure (env, litType lit)
   ConstructorPattern conName pats -> do
     (_, conTy) <- lookupEnv env conName
@@ -196,6 +206,31 @@ zipWithNames env ((_, argTy) :-> retTy) (name : restNames) =
   zipWithNames (env `extend` (name, Forall [] argTy)) retTy restNames
 zipWithNames env ty [] = (env, ty)
 zipWithNames _ _ _ = error "zipWithNames: args len too short"
+
+typeEnv = emptyTyenv
+  `extend` ("Cons", Forall ["z"] $ (Unrestricted, TypeVar "z") :-> ((Unrestricted, CustomType "List" [TypeVar "z"]) :-> CustomType "List" [TypeVar "z"]))
+  `extend` ("Nil", Forall ["z"] $ CustomType "List" [TypeVar "z"])
+  `extend` ("plus", Forall [] $  (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)
+
+ttest = LambdaExpr "$5" () Unrestricted $
+             CaseExpr
+                ( NameExpr "$5" )
+                [
+                    ( ConstructorPattern "Cons"
+                        [ "$6"
+                        , "$7"
+                        ]
+                    , ApplyExpr
+                        ( ApplyExpr (NameExpr "plus")
+                            ( NameExpr "$6" )
+                        )
+                        (LitExpr (IntegerLiteral 1))
+                    )
+                ,
+                    ( ConstructorPattern "Nil" []
+                    , LitExpr (IntegerLiteral 0)
+                    )
+                ]
 
 inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
 inferExpr env = runInfer . infer env
