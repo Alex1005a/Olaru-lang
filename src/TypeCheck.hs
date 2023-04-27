@@ -13,10 +13,10 @@ import Control.Monad.State
 import Data.List (nub)
 import Prelude hiding (foldr)
 import Data.Foldable (foldr, foldrM)
+import Debug.Trace (trace)
 
 data Scheme = Forall [TypeVarName] Type
   deriving (Show, Eq, Ord)
-
 
 newtype TypeEnv = TypeEnv (Map.Map Name Scheme)
   deriving (Semigroup, Monoid)
@@ -41,7 +41,7 @@ runInfer m = case evalState (runExceptT m) initUnique of
   Left err  -> Left err
   Right res -> Right $ closeOver res
 
-closeOver :: (Map.Map TypeVarName Type, Type) -> Scheme
+closeOver :: (Subst, Type) -> Scheme
 closeOver (sub, ty) = normalize sc
   where sc = generalize emptyTyenv (apply sub ty)
 
@@ -69,6 +69,7 @@ instance Substitutable Type where
 
   ftv (TypeVar a)       = Set.singleton a
   ftv ((_, t1) :-> t2) = ftv t1 `Set.union` ftv t2
+  ftv (CustomType _ ts) = foldMap ftv ts
   ftv _        = Set.empty
 
 instance Substitutable Scheme where
@@ -190,7 +191,7 @@ inferPatternDef :: Type -> TypeEnv -> (Pattern, Expr ()) -> Infer (Subst, Type)
 inferPatternDef scrutinee env (pat, caseExpr) = do
   (newEnv, ty) <- inspectPattern env pat
   (s1, retTy) <- infer newEnv caseExpr
-  s2 <- unify (apply s1 ty) scrutinee
+  s2 <- unify scrutinee (apply s1 ty)
   pure (s2 `compose` s1, apply s1 retTy)
 
 inspectPattern :: TypeEnv -> Pattern -> Infer (TypeEnv, Type)
@@ -206,31 +207,6 @@ zipWithNames env ((_, argTy) :-> retTy) (name : restNames) =
   zipWithNames (env `extend` (name, Forall [] argTy)) retTy restNames
 zipWithNames env ty [] = (env, ty)
 zipWithNames _ _ _ = error "zipWithNames: args len too short"
-
-typeEnv = emptyTyenv
-  `extend` ("Cons", Forall ["z"] $ (Unrestricted, TypeVar "z") :-> ((Unrestricted, CustomType "List" [TypeVar "z"]) :-> CustomType "List" [TypeVar "z"]))
-  `extend` ("Nil", Forall ["z"] $ CustomType "List" [TypeVar "z"])
-  `extend` ("plus", Forall [] $  (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)
-
-ttest = LambdaExpr "$5" () Unrestricted $
-             CaseExpr
-                ( NameExpr "$5" )
-                [
-                    ( ConstructorPattern "Cons"
-                        [ "$6"
-                        , "$7"
-                        ]
-                    , ApplyExpr
-                        ( ApplyExpr (NameExpr "plus")
-                            ( NameExpr "$6" )
-                        )
-                        (LitExpr (IntegerLiteral 1))
-                    )
-                ,
-                    ( ConstructorPattern "Nil" []
-                    , LitExpr (IntegerLiteral 0)
-                    )
-                ]
 
 inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
 inferExpr env = runInfer . infer env
@@ -254,16 +230,18 @@ inferTop env ((name, ex):xs) = case inferExpr env ex of
   Right ty -> inferTop (extend env (name, ty)) xs
 -}
 normalize :: Scheme -> Scheme
-normalize (Forall ts body) = Forall (fmap snd ord) (normtype body)
+normalize (Forall _ body) = Forall (fmap snd ord) (normtype body)
   where
     ord = zip (nub $ fv body) letters
 
     fv (TypeVar a)   = [a]
     fv ((_, a) :-> b) = fv a ++ fv b
+    fv (CustomType _ ts) = concatMap fv ts
     fv _   = []
 
     normtype ((m, a) :-> b) = (m, normtype a) :-> normtype b
-    normtype (TypeVar a)   =
+    normtype (CustomType n ts) = CustomType n (normtype <$> ts)
+    normtype (TypeVar a) =
       case lookup a ord of
         Just x -> TypeVar x
         Nothing -> error "type variable not in signature"
