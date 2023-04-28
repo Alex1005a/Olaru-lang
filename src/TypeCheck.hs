@@ -1,5 +1,4 @@
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -36,6 +35,7 @@ data TypeError
   | IncorrectModalityContext Name Modality Modality
   | UsageModality Name Modality Int
   | InconsistentUsage Name
+  | ContructorPatArgsMismatch
   deriving (Show, Eq)
 
 runInfer :: Infer (Subst, Type) -> Either TypeError (Scheme, Subst)
@@ -150,8 +150,8 @@ instantiate (Forall as ty) = do
   pure $ apply s ty
 
 generalize :: TypeEnv -> Type -> Scheme
-generalize env t  = Forall as t
-  where as = Set.toList $ ftv t `Set.difference` ftv env
+generalize env ty  = Forall as ty
+  where as = Set.toList $ ftv ty `Set.difference` ftv env
 
 prims :: TypeEnv
 prims = TypeEnv $ Map.fromList
@@ -183,14 +183,14 @@ infer env ex = case ex of
   LambdaExpr x _ argM e -> do
     tv <- fresh
     let env' = env `extend` (x, Forall [] tv)
-    (s1, t1) <- infer env' e
-    pure (s1, (argM, apply s1 tv) :-> t1)
+    (s, ty) <- infer env' e
+    pure (s, (argM, apply s tv) :-> ty)
 
   ApplyExpr f arg -> do
     tv <- fresh
-    (s1, t1) <- infer env f
-    (s2, t2) <- infer (apply s1 env) arg
-    s3       <- unify (apply s2 t1) ((argModality t2, t2) :-> tv)
+    (s1, funTy) <- infer env f
+    (s2, argTy) <- infer (apply s1 env) arg
+    s3       <- unify (apply s2 funTy) ((argModality argTy, argTy) :-> tv)
     return (s3 `compose` s2 `compose` s1, apply s3 tv)
 
   CaseExpr expr patterns -> do
@@ -217,13 +217,13 @@ inspectPattern env pat = case pat of
   LiteralPattern lit -> pure (env, litType lit)
   ConstructorPattern conName pats -> do
     (_, conTy) <- lookupEnv env conName
-    pure $ zipWithNames env conTy pats
+    zipWithNames env conTy pats
 
-zipWithNames :: TypeEnv -> Type -> [Name] -> (TypeEnv, Type)
+zipWithNames :: TypeEnv -> Type -> [Name] -> Infer (TypeEnv, Type)
 zipWithNames env ((_, argTy) :-> retTy) (name : restNames) =
   zipWithNames (env `extend` (name, Forall [] argTy)) retTy restNames
-zipWithNames env ty [] = (env, ty)
-zipWithNames _ _ _ = error "zipWithNames: args len too short"
+zipWithNames env ty [] = pure (env, ty)
+zipWithNames _ _ _ = throwError ContructorPatArgsMismatch
 
 inferExpr :: TypeEnv -> Expr () -> Either TypeError (Scheme, Subst)
 inferExpr env = runInfer . infer env
