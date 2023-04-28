@@ -15,6 +15,7 @@ import Prelude hiding (foldr)
 import Data.Foldable (foldr, foldrM)
 import Data.Either (partitionEithers)
 import Data.Functor.Identity (runIdentity)
+import ExpandMap (unionWithF)
 
 data Scheme = Forall [TypeVarName] Type
   deriving (Show, Eq, Ord)
@@ -235,15 +236,9 @@ extendWithAllDefs env (name : rest) =
 
 unionWithUnify :: Subst -> Subst -> Either TypeError Subst
 unionWithUnify sub1 sub2 =
-  let newSub = Map.unionWith (\ty1 ty2 -> do
-      ty1' <- ty1
-      ty2' <- ty2
-      s <- unify ty1' ty2'
-      pure (apply s ty1')) (Map.map pure sub1) (Map.map pure sub2) in
-  let newSubList = (\(tyName, ty) -> (tyName,) <$> runIdentity (runExceptT ty)) <$> Map.toList newSub in
-    case partitionEithers newSubList of
-      (err: _, _) -> Left err
-      (_, s) -> Right $ Map.fromList s
+  runIdentity $ runExceptT $ unionWithF (\ty1 ty2 -> do
+      s <- unify ty1 ty2
+      pure (apply s ty1)) sub1 sub2
 
 inferTop :: Subst -> TypeEnv -> [(Name, Expr ())] -> Either TypeError TypeEnv
 inferTop _ env [] = Right env
