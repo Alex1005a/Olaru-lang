@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module TypeCheck where
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -10,15 +11,17 @@ import Algebra
 import Expressions
 import Control.Monad.Except
 import Control.Monad.State
-import Data.List (nub)
+import Data.List (nub, isPrefixOf)
 import Prelude hiding (foldr)
 import Data.Foldable (foldr, foldrM)
+import Data.Either (partitionEithers)
+import Data.Functor.Identity (runIdentity)
 
 data Scheme = Forall [TypeVarName] Type
   deriving (Show, Eq, Ord)
 
 newtype TypeEnv = TypeEnv (Map.Map Name Scheme)
-  deriving (Semigroup, Monoid)
+  deriving (Semigroup, Monoid, Show)
 
 newtype Unique = Unique { count :: Int }
 
@@ -35,14 +38,32 @@ data TypeError
   | InconsistentUsage Name
   deriving (Show, Eq)
 
-runInfer :: Infer (Subst, Type) -> Either TypeError Scheme
+runInfer :: Infer (Subst, Type) -> Either TypeError (Scheme, Subst)
 runInfer m = case evalState (runExceptT m) initUnique of
   Left err  -> Left err
-  Right res -> Right $ closeOver res
+  Right res@(sub, _) -> Right (closeOver res, Map.filterWithKey (\k _ -> "$" `isPrefixOf` k) sub)
 
 closeOver :: (Subst, Type) -> Scheme
 closeOver (sub, ty) = normalize sc
   where sc = generalize emptyTyenv (apply sub ty)
+
+normalize :: Scheme -> Scheme
+normalize (Forall _ body) = Forall (fmap snd ord) (normtype body)
+  where
+    ord = zip (nub $ fv body) letters
+
+    fv (TypeVar a)   = [a]
+    fv ((_, argTy) :-> retTy) = fv argTy ++ fv retTy
+    fv (CustomType _ ts) = concatMap fv ts
+    fv _   = []
+
+    normtype ((m, a) :-> b) = (m, normtype a) :-> normtype b
+    normtype (CustomType n ts) = CustomType n (normtype <$> ts)
+    normtype (TypeVar a) =
+      case lookup a ord of
+        Just x -> TypeVar x
+        Nothing -> error "type variable not in signature"
+    normtype a = a
 
 initUnique :: Unique
 initUnique = Unique { count = 0 }
@@ -53,37 +74,33 @@ extend (TypeEnv env) (x, s) = TypeEnv $ Map.insert x s env
 emptyTyenv :: TypeEnv
 emptyTyenv = TypeEnv Map.empty
 
-typeof :: TypeEnv -> TypeVarName -> Maybe Scheme
-typeof (TypeEnv env) name = Map.lookup name env
-
 class Substitutable a where
   apply :: Subst -> a -> a
   ftv   :: a -> Set.Set TypeVarName
 
 instance Substitutable Type where
-  apply s t@(TypeVar a)     = Map.findWithDefault t a s
-  apply s ((m, t1) :-> t2) = (m, apply s t1) :-> apply s t2
-  apply sub (CustomType name ts) = CustomType name (map (apply sub) ts)
+  apply s ty@(TypeVar a)     = Map.findWithDefault ty a s
+  apply s ((m, argTy) :-> retTy) = (m, apply s argTy) :-> apply s retTy
+  apply s (CustomType name ts) = CustomType name (map (apply s) ts)
   apply _ a       = a
 
   ftv (TypeVar a)       = Set.singleton a
-  ftv ((_, t1) :-> t2) = ftv t1 `Set.union` ftv t2
+  ftv ((_, argTy) :-> retTy) = ftv argTy `Set.union` ftv retTy
   ftv (CustomType _ ts) = foldMap ftv ts
   ftv _        = Set.empty
 
 instance Substitutable Scheme where
-  apply s (Forall as t)   = Forall as $ apply s' t
+  apply s (Forall as ty)   = Forall as $ apply s' ty
                             where s' = foldr Map.delete s as
-  ftv (Forall as t) = ftv t `Set.difference` Set.fromList as
+  ftv (Forall as ty) = ftv ty `Set.difference` Set.fromList as
 
 instance Substitutable a => Substitutable [a] where
   apply = fmap . apply
   ftv   = foldr (Set.union . ftv) Set.empty
 
 instance Substitutable TypeEnv where
-  apply s (TypeEnv env) =  TypeEnv $ Map.map (apply s) env
+  apply s (TypeEnv env) = TypeEnv $ Map.map (apply s) env
   ftv (TypeEnv env) = ftv $ Map.elems env
-
 
 nullSubst :: Subst
 nullSubst = Map.empty
@@ -91,10 +108,10 @@ nullSubst = Map.empty
 compose :: Subst -> Subst -> Subst
 s1 `compose` s2 = Map.map (apply s1) s2 `Map.union` s1
 
-unify :: Type -> Type -> Infer Subst
-unify ((m, l) :-> r) ((m', l') :-> r') | m == m' = do
-  s1 <- unify l l'
-  s2 <- unify (apply s1 r) (apply s1 r')
+unify :: (Monad a) => Type -> Type -> ExceptT TypeError a Subst
+unify ((m, argTy) :-> retTy) ((m', argTy') :-> retTy') | m == m' = do
+  s1 <- unify argTy argTy'
+  s2 <- unify (apply s1 retTy) (apply s1 retTy')
   pure (s2 `compose` s1)
 unify (TypeVar a) t = bind a t
 unify t (TypeVar a) = bind a t
@@ -108,7 +125,7 @@ unify (CustomType name1 ts1) (CustomType name2 ts2)
 unify a b | a == b = pure nullSubst
 unify t1 t2 = throwError $ UnificationFail t1 t2
 
-bind ::  TypeVarName -> Type -> Infer Subst
+bind :: (Monad a) => TypeVarName -> Type -> ExceptT TypeError a Subst
 bind a t
   | t == TypeVar a     = pure nullSubst
   | occursCheck a t = throwError $ InfiniteType a t
@@ -127,10 +144,10 @@ fresh = do
   pure $ TypeVar (letters !! count s)
 
 instantiate ::  Scheme -> Infer Type
-instantiate (Forall as t) = do
+instantiate (Forall as ty) = do
   as' <- mapM (const fresh) as
   let s = Map.fromList $ zip as as'
-  pure $ apply s t
+  pure $ apply s ty
 
 generalize :: TypeEnv -> Type -> Scheme
 generalize env t  = Forall as t
@@ -169,10 +186,10 @@ infer env ex = case ex of
     (s1, t1) <- infer env' e
     pure (s1, (argM, apply s1 tv) :-> t1)
 
-  ApplyExpr e1 e2 -> do
+  ApplyExpr f arg -> do
     tv <- fresh
-    (s1, t1) <- infer env e1
-    (s2, t2) <- infer (apply s1 env) e2
+    (s1, t1) <- infer env f
+    (s2, t2) <- infer (apply s1 env) arg
     s3       <- unify (apply s2 t1) ((argModality t2, t2) :-> tv)
     return (s3 `compose` s2 `compose` s1, apply s3 tv)
 
@@ -208,41 +225,36 @@ zipWithNames env ((_, argTy) :-> retTy) (name : restNames) =
 zipWithNames env ty [] = (env, ty)
 zipWithNames _ _ _ = error "zipWithNames: args len too short"
 
-inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
+inferExpr :: TypeEnv -> Expr () -> Either TypeError (Scheme, Subst)
 inferExpr env = runInfer . infer env
 
-{-
-inferPrim :: TypeEnv -> [Expr ()] -> Type -> Infer (Subst, Type)
-inferPrim env l t = do
-  tv <- fresh
-  (s1, tf) <- foldM inferStep (nullSubst, id) l
-  s2 <- unify (apply s1 (tf tv)) t
-  pure (s2 `compose` s1, apply s2 tv)
-  where
-  inferStep (s, tf) exp = do
-    (s', t) <- infer (apply s env) Linear exp
-    pure (s' `compose` s, tf . ((undefined, t) :->))
+extendWithAllDefs :: TypeEnv -> [Name] -> TypeEnv
+extendWithAllDefs env [] = env
+extendWithAllDefs env (name : rest) =
+  extendWithAllDefs env rest `extend` (name, Forall [] $ TypeVar $ "$" ++ name)
 
-inferTop :: TypeEnv -> [(String, Expr ())] -> Either TypeError TypeEnv
-inferTop env [] = Right env
-inferTop env ((name, ex):xs) = case inferExpr env ex of
+unionWithUnify :: Subst -> Subst -> Either TypeError Subst
+unionWithUnify sub1 sub2 =
+  let newSub = Map.unionWith (\ty1 ty2 -> do
+      ty1' <- ty1
+      ty2' <- ty2
+      s <- unify ty1' ty2'
+      pure (apply s ty1')) (Map.map pure sub1) (Map.map pure sub2) in
+  let newSubList = (\(tyName, ty) -> (tyName,) <$> runIdentity (runExceptT ty)) <$> Map.toList newSub in
+    case partitionEithers newSubList of
+      (err: _, _) -> Left err
+      (_, s) -> Right $ Map.fromList s
+
+inferTop :: Subst -> TypeEnv -> [(Name, Expr ())] -> Either TypeError TypeEnv
+inferTop _ env [] = Right env
+inferTop sub env ((name, expr) : xs) = case inferExpr env expr of
   Left err -> Left err
-  Right ty -> inferTop (extend env (name, ty)) xs
--}
-normalize :: Scheme -> Scheme
-normalize (Forall _ body) = Forall (fmap snd ord) (normtype body)
-  where
-    ord = zip (nub $ fv body) letters
+  Right (sch@(Forall _ ty), currSub) -> do
+    newSub <- unionWithUnify sub currSub
+    case Map.lookup ("$" ++ name) newSub of
+      Just sTy -> void $ runExcept $ unify sTy ty
+      Nothing -> pure ()
+    inferTop newSub (extend env (name, sch)) xs
 
-    fv (TypeVar a)   = [a]
-    fv ((_, a) :-> b) = fv a ++ fv b
-    fv (CustomType _ ts) = concatMap fv ts
-    fv _   = []
-
-    normtype ((m, a) :-> b) = (m, normtype a) :-> normtype b
-    normtype (CustomType n ts) = CustomType n (normtype <$> ts)
-    normtype (TypeVar a) =
-      case lookup a ord of
-        Just x -> TypeVar x
-        Nothing -> error "type variable not in signature"
-    normtype a = a
+runInferTop :: [(Name, Expr ())] -> Either TypeError TypeEnv
+runInferTop defs = inferTop nullSubst (extendWithAllDefs prims $ map fst defs) defs
