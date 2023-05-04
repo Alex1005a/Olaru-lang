@@ -25,7 +25,6 @@ library
       Eval
       ExpandMap
       Expressions
-      ModalCheck
       TypeCheck
       Types
   other-modules:

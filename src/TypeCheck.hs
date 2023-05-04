@@ -255,7 +255,7 @@ inferTop env ((name, expr) : xs) = do
   pure $ (name, ty) : rest
 
 runInferTop :: [(Name, Expr ())] -> Either TypeError [(Name, Scheme)]
-runInferTop defs = do 
+runInferTop defs = do
   let inferDefs = inferTop (extendWithAllDefs prims $ map fst defs) defs
   case runState (runExceptT inferDefs) (nullSubst, initUnique) of
     (Left err, _)  -> Left err
