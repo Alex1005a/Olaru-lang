@@ -10,13 +10,10 @@ import Algebra
 import Expressions
 import Control.Monad.Except
 import Control.Monad.State
-import Data.List (nub, isPrefixOf)
+import Data.List (nub)
 import Prelude hiding (foldr)
 import Data.Foldable (foldr, foldrM)
-import Data.Either (partitionEithers)
-import Data.Functor.Identity (runIdentity)
-import ExpandMap (unionWithF)
-import Debug.Trace (trace, traceShowId)
+import Data.Bifunctor (first)
 
 data Scheme = Forall [TypeVarName] Type
   deriving (Show, Eq, Ord)
@@ -26,7 +23,7 @@ newtype TypeEnv = TypeEnv (Map.Map Name Scheme)
 
 newtype Unique = Unique { count :: Int }
 
-type Infer = ExceptT TypeError (State Unique)
+type Infer = ExceptT TypeError (State (Subst, Unique))
 type Subst = Map.Map TypeVarName Type
 
 data TypeError
@@ -40,10 +37,10 @@ data TypeError
   | ContructorPatArgsMismatch
   deriving (Show, Eq)
 
-runInfer :: Infer (Subst, Type) -> Either TypeError (Scheme, Subst)
-runInfer m = case evalState (runExceptT m) initUnique of
-  Left err  -> Left err
-  Right res@(sub, _) -> Right (closeOver res, Map.filterWithKey (\k _ -> "$" `isPrefixOf` k) sub)
+runInfer :: Infer Type -> Either TypeError Scheme
+runInfer m = case runState (runExceptT m) (nullSubst, initUnique) of
+  (Left err, _)  -> Left err
+  (Right ty, (s, _)) -> Right (closeOver (s, ty))
 
 closeOver :: (Subst, Type) -> Scheme
 closeOver (sub, ty) = normalize sc
@@ -110,22 +107,22 @@ nullSubst = Map.empty
 compose :: Subst -> Subst -> Subst
 s1 `compose` s2 = Map.map (apply s1) s2 `Map.union` s1
 
-unify :: (Monad a) => Type -> Type -> ExceptT TypeError a Subst
-unify ((m, argTy) :-> retTy) ((m', argTy') :-> retTy') | m == m' = do
-  s1 <- unify argTy argTy'
-  s2 <- unify (apply s1 retTy) (apply s1 retTy')
+mgu :: (Monad a) => Type -> Type -> ExceptT TypeError a Subst
+mgu ((m, argTy) :-> retTy) ((m', argTy') :-> retTy') | m == m' = do
+  s1 <- mgu argTy argTy'
+  s2 <- mgu (apply s1 retTy) (apply s1 retTy')
   pure (s2 `compose` s1)
-unify (TypeVar a) t = bind a t
-unify t (TypeVar a) = bind a t
-unify (CustomType name1 ts1) (CustomType name2 ts2)
+mgu (TypeVar a) t = bind a t
+mgu t (TypeVar a) = bind a t
+mgu (CustomType name1 ts1) (CustomType name2 ts2)
   | name1 == name2 && length ts1 == length ts2 =
     let together = zip ts1 ts2
         go acc (t1, t2) = do
-          su <- unify (apply acc t1) (apply acc t2)
+          su <- mgu (apply acc t1) (apply acc t2)
           return (su <> acc)
      in foldM go mempty together
-unify a b | a == b = pure nullSubst
-unify t1 t2 = throwError $ UnificationFail t1 t2
+mgu a b | a == b = pure nullSubst
+mgu t1 t2 = throwError $ UnificationFail t1 t2
 
 bind :: (Monad a) => TypeVarName -> Type -> ExceptT TypeError a Subst
 bind a t
@@ -136,14 +133,27 @@ bind a t
 occursCheck ::  Substitutable a => TypeVarName -> a -> Bool
 occursCheck a t = a `Set.member` ftv t
 
+getSubst :: Infer Subst
+getSubst = gets fst
+
+extSubst :: Subst -> Infer ()
+extSubst s1 =
+  modify (first (compose s1))
+
+unify      :: Type -> Type -> Infer ()
+unify t1 t2 = do
+  s <- getSubst
+  u <- mgu (apply s t1) (apply s t2)
+  extSubst u
+
 letters :: [String]
 letters = [1..] >>= flip replicateM ['a'..'z']
 
 fresh :: Infer Type
 fresh = do
-  s <- get
-  put s{count = count s + 1}
-  pure $ TypeVar (letters !! count s)
+  (s, u) <- get
+  put (s, u{count = count u + 1})
+  pure $ TypeVar (letters !! count u)
 
 instantiate ::  Scheme -> Infer Type
 instantiate (Forall as ty) = do
@@ -165,12 +175,11 @@ prims = TypeEnv $ Map.fromList
     ("False", Forall [] $ CustomType "Bool"[])
   ]
 
-lookupEnv :: TypeEnv -> Name -> Infer (Subst, Type)
+lookupEnv :: TypeEnv -> Name -> Infer Type
 lookupEnv (TypeEnv env) x = do
   case Map.lookup x env of
     Nothing -> throwError $ UnboundVariable (show x)
-    Just s  -> do t <- instantiate s
-                  pure (nullSubst, t)
+    Just s  -> do instantiate s
 
 litType :: Literal -> Type
 litType (IntegerLiteral _) = PrimType IntegerType
@@ -180,48 +189,48 @@ argModality :: Type -> Modality
 argModality ((m, _) :-> _) = m
 argModality _ = Unrestricted
 
-infer :: TypeEnv -> Expr () -> Infer (Subst, Type)
+infer :: TypeEnv -> Expr () -> Infer Type
 infer env ex = case ex of
   NameExpr x -> lookupEnv env x
 
   LambdaExpr x _ argM e -> do
     tv <- fresh
     let env' = env `extend` (x, Forall [] tv)
-    (s, ty) <- infer env' e
-    pure (s, (argM, apply s tv) :-> ty)
+    ty <- infer env' e
+    pure ((argM, tv) :-> ty)
 
   ApplyExpr f arg -> do
     tv <- fresh
-    (s1, funTy) <- infer env f
-    (s2, argTy) <- infer (apply s1 env) arg
-    s3       <- unify (apply s2 funTy) ((argModality argTy, argTy) :-> tv)
-    return (s3 `compose` s2 `compose` s1, apply s3 tv)
+    funTy <- infer env f
+    argTy <- infer env arg
+    unify funTy ((argModality argTy, argTy) :-> tv)
+    return tv
 
   CaseExpr expr patterns -> do
-    (s, patTy) <- infer env expr
-    casesInfer <- forM patterns (inferPatternDef (apply s env))
+    patTy <- infer env expr
+    casesInfer <- forM patterns (inferPatternDef env)
     tv <- fresh
-    (s1, _, ty) <- foldrM (\(s2, pTy2, caseTy) (s1, pTy1, ty) -> do
-          subtTy <- unify ty caseTy
-          patSubsTy <- unify pTy1 pTy2
-          pure (s1 `compose` s2 `compose` patSubsTy `compose` subtTy, apply patSubsTy pTy1, apply subtTy ty)
-        ) (nullSubst, patTy, tv) casesInfer
-    pure (s1, ty)
+    (_, ty) <- foldrM (\(patTy2, caseTy) (patTy1, ty) -> do
+          unify ty caseTy
+          unify patTy1 patTy2
+          pure (patTy1, ty)
+        ) (patTy, tv) casesInfer
+    pure ty
 
-  LitExpr l  -> pure (nullSubst, litType l)
+  LitExpr l  -> pure $ litType l
 
-inferPatternDef :: TypeEnv -> (Pattern, Expr ()) -> Infer (Subst, Type, Type)
+inferPatternDef :: TypeEnv -> (Pattern, Expr ()) -> Infer (Type, Type)
 inferPatternDef  env (pat, caseExpr) = do
   (newEnv, patTy) <- inspectPattern env pat
-  (s, retTy) <- infer newEnv caseExpr
-  pure (s, apply s patTy, apply s retTy)
+  retTy <- infer newEnv caseExpr
+  pure (patTy, retTy)
 
 inspectPattern :: TypeEnv -> Pattern -> Infer (TypeEnv, Type)
 inspectPattern env pat = case pat of
   Default -> (env,) <$> fresh
   LiteralPattern lit -> pure (env, litType lit)
   ConstructorPattern conName pats -> do
-    (_, conTy) <- lookupEnv env conName
+    conTy <- lookupEnv env conName
     zipWithNames env conTy pats
 
 zipWithNames :: TypeEnv -> Type -> [Name] -> Infer (TypeEnv, Type)
@@ -230,7 +239,7 @@ zipWithNames env ((_, argTy) :-> retTy) (name : restNames) =
 zipWithNames env ty [] = pure (env, ty)
 zipWithNames _ _ _ = throwError ContructorPatArgsMismatch
 
-inferExpr :: TypeEnv -> Expr () -> Either TypeError (Scheme, Subst)
+inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
 inferExpr env = runInfer . infer env
 
 extendWithAllDefs :: TypeEnv -> [Name] -> TypeEnv
@@ -238,22 +247,16 @@ extendWithAllDefs env [] = env
 extendWithAllDefs env (name : rest) =
   extendWithAllDefs env rest `extend` (name, Forall [] $ TypeVar $ "$" ++ name)
 
-unionWithUnify :: Subst -> Subst -> Either TypeError Subst
-unionWithUnify sub1 sub2 =
-  runIdentity $ runExceptT $ unionWithF (\ty1 ty2 -> do
-      s <- unify ty1 ty2
-      pure (apply s ty1)) sub1 sub2
+inferTop :: TypeEnv -> [(Name, Expr ())] -> Infer [(Name, Type)]
+inferTop _ [] = pure []
+inferTop env ((name, expr) : xs) = do
+  ty <- infer env expr
+  rest <- inferTop env xs
+  pure $ (name, ty) : rest
 
-inferTop :: Subst -> TypeEnv -> [(Name, Expr ())] -> Either TypeError TypeEnv
-inferTop _ env [] = Right env
-inferTop sub env ((name, expr) : xs) = case inferExpr env expr of
-  Left err -> Left err
-  Right (sch@(Forall _ ty), currSub) -> do
-    newSub <- unionWithUnify sub currSub
-    case Map.lookup ("$" ++ name) newSub of
-      Just sTy -> void $ runExcept $ unify sTy ty
-      Nothing -> pure ()
-    inferTop newSub (extend env (name, sch)) xs
-
-runInferTop :: [(Name, Expr ())] -> Either TypeError TypeEnv
-runInferTop defs = inferTop nullSubst (extendWithAllDefs prims $ map fst defs) defs
+runInferTop :: [(Name, Expr ())] -> Either TypeError [(Name, Scheme)]
+runInferTop defs = do 
+  let inferDefs = inferTop (extendWithAllDefs prims $ map fst defs) defs
+  case runState (runExceptT inferDefs) (nullSubst, initUnique) of
+    (Left err, _)  -> Left err
+    (Right defsSchemed, (s, _)) -> Right ((\(n, ty) -> (n, closeOver (s, ty))) <$> defsSchemed)
