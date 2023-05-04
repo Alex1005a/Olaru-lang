@@ -16,6 +16,7 @@ import Data.Foldable (foldr, foldrM)
 import Data.Either (partitionEithers)
 import Data.Functor.Identity (runIdentity)
 import ExpandMap (unionWithF)
+import Debug.Trace (trace, traceShowId)
 
 data Scheme = Forall [TypeVarName] Type
   deriving (Show, Eq, Ord)
@@ -46,7 +47,7 @@ runInfer m = case evalState (runExceptT m) initUnique of
 
 closeOver :: (Subst, Type) -> Scheme
 closeOver (sub, ty) = normalize sc
-  where sc = generalize emptyTyenv (apply sub ty)
+  where sc = generalize emptyTyenv $ apply sub ty
 
 normalize :: Scheme -> Scheme
 normalize (Forall _ body) = Forall (fmap snd ord) (normtype body)
@@ -159,7 +160,9 @@ prims = TypeEnv $ Map.fromList
   [
     ("plus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
     ("mult", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
-    ("minus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType)
+    ("minus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
+    ("True", Forall [] $ CustomType "Bool"[]),
+    ("False", Forall [] $ CustomType "Bool"[])
   ]
 
 lookupEnv :: TypeEnv -> Name -> Infer (Subst, Type)
@@ -196,21 +199,22 @@ infer env ex = case ex of
 
   CaseExpr expr patterns -> do
     (s, patTy) <- infer env expr
-    casesInfer <- forM patterns (inferPatternDef (apply s patTy) (apply s env))
+    casesInfer <- forM patterns (inferPatternDef (apply s env))
     tv <- fresh
-    foldrM (\(s2, caseTy) (s1, ty) -> do
+    (s1, _, ty) <- foldrM (\(s2, pTy2, caseTy) (s1, pTy1, ty) -> do
           subtTy <- unify ty caseTy
-          pure (s1 `compose` s2 `compose` subtTy, apply subtTy ty)
-        ) (nullSubst, tv) casesInfer
+          patSubsTy <- unify pTy1 pTy2
+          pure (s1 `compose` s2 `compose` patSubsTy `compose` subtTy, apply patSubsTy pTy1, apply subtTy ty)
+        ) (nullSubst, patTy, tv) casesInfer
+    pure (s1, ty)
 
   LitExpr l  -> pure (nullSubst, litType l)
 
-inferPatternDef :: Type -> TypeEnv -> (Pattern, Expr ()) -> Infer (Subst, Type)
-inferPatternDef scrutinee env (pat, caseExpr) = do
-  (newEnv, ty) <- inspectPattern env pat
-  (s1, retTy) <- infer newEnv caseExpr
-  s2 <- unify scrutinee (apply s1 ty)
-  pure (s2 `compose` s1, apply s1 retTy)
+inferPatternDef :: TypeEnv -> (Pattern, Expr ()) -> Infer (Subst, Type, Type)
+inferPatternDef  env (pat, caseExpr) = do
+  (newEnv, patTy) <- inspectPattern env pat
+  (s, retTy) <- infer newEnv caseExpr
+  pure (s, apply s patTy, apply s retTy)
 
 inspectPattern :: TypeEnv -> Pattern -> Infer (TypeEnv, Type)
 inspectPattern env pat = case pat of
