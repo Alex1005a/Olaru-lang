@@ -8,6 +8,7 @@ import qualified Data.Set as Set
 import Types
 import Algebra
 import Expressions
+import SortDefs (sortDefs)
 import Control.Monad.Except
 import Control.Monad.State
 import Data.List (nub)
@@ -256,9 +257,16 @@ inferTop env defs = do
   zipWithM_ unify ts types
   pure $ zip is types
 
-runInferTop :: [(Name, Expr ())] -> Either TypeError [(Name, Scheme)]
-runInferTop defs = do
-  let inferDefs = inferTop prims defs
+runInferMutualTop :: TypeEnv -> [(Name, Expr ())] -> Either TypeError [(Name, Scheme)]
+runInferMutualTop env defs = do
+  let inferDefs = inferTop env defs
   case runState (runExceptT inferDefs) (nullSubst, initUnique) of
     (Left err, _)  -> Left err
     (Right defsSchemed, (s, _)) -> Right ((\(n, ty) -> (n, closeOver (s, ty))) <$> defsSchemed)
+
+runInferSeq :: TypeEnv -> [[(Name, Expr ())]] -> Either TypeError [(Name, Scheme)]
+runInferSeq env (defs : rest) = do
+  types <- runInferMutualTop env defs
+  restTypes <- runInferSeq (env `union` TypeEnv (Map.fromList types)) rest
+  pure $ types ++ restTypes
+runInferSeq _ [] = pure []

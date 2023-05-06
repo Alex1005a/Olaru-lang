@@ -25,6 +25,7 @@ library
       Eval
       Expressions
       ModalCheck
+      SortDefs
       TypeCheck
       Types
   other-modules:
