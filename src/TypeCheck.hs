@@ -70,6 +70,9 @@ initUnique = Unique { count = 0 }
 extend :: TypeEnv -> (TypeVarName, Scheme) -> TypeEnv
 extend (TypeEnv env) (x, s) = TypeEnv $ Map.insert x s env
 
+union :: TypeEnv -> TypeEnv -> TypeEnv
+union (TypeEnv env1) (TypeEnv env2) = TypeEnv $ Map.union env1 env2
+
 emptyTyenv :: TypeEnv
 emptyTyenv = TypeEnv Map.empty
 
@@ -119,8 +122,8 @@ mgu (CustomType name1 ts1) (CustomType name2 ts2)
     let together = zip ts1 ts2
         go acc (t1, t2) = do
           su <- mgu (apply acc t1) (apply acc t2)
-          return (su <> acc)
-     in foldM go mempty together
+          return (su `compose` acc)
+     in foldM go nullSubst together
 mgu a b | a == b = pure nullSubst
 mgu t1 t2 = throwError $ UnificationFail t1 t2
 
@@ -203,7 +206,7 @@ infer env ex = case ex of
     tv <- fresh
     funTy <- infer env f
     argTy <- infer env arg
-    unify funTy ((argModality argTy, argTy) :-> tv)
+    unify ((argModality argTy, argTy) :-> tv) funTy
     return tv
 
   CaseExpr expr patterns -> do
@@ -242,21 +245,20 @@ zipWithNames _ _ _ = throwError ContructorPatArgsMismatch
 inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
 inferExpr env = runInfer . infer env
 
-extendWithAllDefs :: TypeEnv -> [Name] -> TypeEnv
-extendWithAllDefs env [] = env
-extendWithAllDefs env (name : rest) =
-  extendWithAllDefs env rest `extend` (name, Forall [] $ TypeVar $ "$" ++ name)
-
 inferTop :: TypeEnv -> [(Name, Expr ())] -> Infer [(Name, Type)]
-inferTop _ [] = pure []
-inferTop env ((name, expr) : xs) = do
-  ty <- infer env expr
-  rest <- inferTop env xs
-  pure $ (name, ty) : rest
+inferTop env defs = do
+  ts <- mapM (const fresh) defs
+  let scs = map (Forall []) ts
+      is = map fst defs
+      extEnv = env `union` TypeEnv (Map.fromList $ zip is scs)
+  let exprs = map snd defs
+  types <- mapM (infer extEnv) exprs
+  zipWithM_ unify ts types
+  pure $ zip is types
 
 runInferTop :: [(Name, Expr ())] -> Either TypeError [(Name, Scheme)]
 runInferTop defs = do
-  let inferDefs = inferTop (extendWithAllDefs prims $ map fst defs) defs
+  let inferDefs = inferTop prims defs
   case runState (runExceptT inferDefs) (nullSubst, initUnique) of
     (Left err, _)  -> Left err
     (Right defsSchemed, (s, _)) -> Right ((\(n, ty) -> (n, closeOver (s, ty))) <$> defsSchemed)

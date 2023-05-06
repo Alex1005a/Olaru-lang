@@ -23,8 +23,8 @@ library
   exposed-modules:
       Algebra
       Eval
-      ExpandMap
       Expressions
+      ModalCheck
       TypeCheck
       Types
   other-modules:
