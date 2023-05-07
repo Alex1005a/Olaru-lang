@@ -5,12 +5,11 @@ import qualified Data.Set as Set
 import Expressions ( Name, Expr(..) )
 import Data.Graph ( buildG, scc, Forest, Tree(..) )
 import Data.Maybe (fromJust)
-import Data.Tuple (swap)
 import Data.Bifunctor (bimap, Bifunctor (..))
 
-allCalls :: [Name] -> Expr a -> Set.Set Name
+allCalls :: Set.Set Name -> Expr a -> Set.Set Name
 allCalls defs (NameExpr name)
-    | name `elem` defs = Set.singleton name
+    | name `Set.member` defs = Set.singleton name
     | otherwise = Set.empty
 allCalls defs (LambdaExpr _ _ _ expr) = allCalls defs expr
 allCalls _ (LitExpr _) = Set.empty
@@ -23,19 +22,16 @@ treeToList (Node l subTrees) = l : concatMap treeToList subTrees
 forestToList :: Forest a -> [[a]]
 forestToList = map treeToList
 
-sortFuns :: [Name] -> [(Name, Name)] -> [[Name]]
+sortFuns :: Set.Set Name -> [(Name, Name)] -> [[Name]]
 sortFuns funs calls =
-  let indexFuns = zip funs [0..]
-      indexCalls = map (bimap (fromJust . flip lookup indexFuns) (fromJust . flip lookup indexFuns)) calls
-      forest = scc $ buildG (0, length indexFuns - 1) indexCalls
-      lst = forestToList forest
-      invertIdxFuns = map swap indexFuns in
-  map (map (fromJust . flip lookup invertIdxFuns)) lst
-
+  let indexCalls = map (bimap (`Set.findIndex` funs) (`Set.findIndex` funs)) calls
+      forest = scc $ buildG (0, length funs - 1) indexCalls
+      lst = forestToList forest in
+  map (map (`Set.elemAt` funs)) lst
 
 sortDefs :: [(Name, Expr a)] -> [[(Name, Expr a)]]
 sortDefs defs =
-    let funs = map fst defs
+    let funs = Set.fromList $ map fst defs
         calls = concatMap (\(name, expr) -> map (name,) $ Set.toList (allCalls funs expr)) defs
         sortedDefs = sortFuns funs calls in
     map (map (\name -> (name, fromJust $ lookup name defs))) sortedDefs
