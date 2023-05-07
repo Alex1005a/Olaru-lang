@@ -5,6 +5,7 @@ data Modality
     | Relevant
     | Affine
     | Linear
+    -- | Ordered
     | Zero
     deriving (Eq, Show, Ord)
 

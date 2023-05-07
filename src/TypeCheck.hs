@@ -7,29 +7,35 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Types
 import Algebra
-import Expressions
+import Expressions ( Expr(..), Literal(..), Name, Pattern(..) )
 import SortDefs (sortDefs)
 import Control.Monad.Except
+    ( ExceptT,
+      foldM,
+      zipWithM_,
+      forM,
+      MonadError(throwError),
+      runExceptT )
 import Control.Monad.State
-import Data.List (nub)
-import Prelude hiding (foldr)
-import Data.Foldable (foldr, foldrM)
+    ( State, gets, modify, runState, MonadState(put, get) )
+import Data.Foldable (foldrM)
 import Data.Bifunctor (first)
+import GHC.Natural (Natural)
 
-data Scheme = Forall [TypeVarName] Type
+data Scheme = Forall [TypeVar] Type
   deriving (Show, Eq, Ord)
 
 newtype TypeEnv = TypeEnv (Map.Map Name Scheme)
   deriving (Semigroup, Monoid, Show)
 
-newtype Unique = Unique { count :: Int }
+newtype Unique = Unique { count :: Natural }
 
 type Infer = ExceptT TypeError (State (Subst, Unique))
-type Subst = Map.Map TypeVarName Type
+type Subst = Map.Map TypeVar Type
 
 data TypeError
   = UnificationFail Type Type
-  | InfiniteType TypeVarName Type
+  | InfiniteType TypeVar Type
   | UnboundVariable String
   | ApplicationToNonFunction
   | IncorrectModalityContext Name Modality Modality
@@ -44,18 +50,12 @@ runInfer m = case runState (runExceptT m) (nullSubst, initUnique) of
   (Right ty, (s, _)) -> Right (closeOver (s, ty))
 
 closeOver :: (Subst, Type) -> Scheme
-closeOver (sub, ty) = normalize sc
-  where sc = generalize emptyTyenv $ apply sub ty
+closeOver (sub, ty) = normalize $ apply sub ty
 
-normalize :: Scheme -> Scheme
-normalize (Forall _ body) = Forall (fmap snd ord) (normtype body)
+normalize :: Type -> Scheme
+normalize ty = Forall (fmap snd ord) (normtype ty)
   where
-    ord = zip (nub $ fv body) letters
-
-    fv (TypeVar a)   = [a]
-    fv ((_, argTy) :-> retTy) = fv argTy ++ fv retTy
-    fv (CustomType _ ts) = concatMap fv ts
-    fv _   = []
+    ord = zip (Set.toList $ ftv ty) [0..]
 
     normtype ((m, a) :-> b) = (m, normtype a) :-> normtype b
     normtype (CustomType n ts) = CustomType n (normtype <$> ts)
@@ -68,7 +68,7 @@ normalize (Forall _ body) = Forall (fmap snd ord) (normtype body)
 initUnique :: Unique
 initUnique = Unique { count = 0 }
 
-extend :: TypeEnv -> (TypeVarName, Scheme) -> TypeEnv
+extend :: TypeEnv -> (Name, Scheme) -> TypeEnv
 extend (TypeEnv env) (x, s) = TypeEnv $ Map.insert x s env
 
 union :: TypeEnv -> TypeEnv -> TypeEnv
@@ -79,7 +79,7 @@ emptyTyenv = TypeEnv Map.empty
 
 class Substitutable a where
   apply :: Subst -> a -> a
-  ftv   :: a -> Set.Set TypeVarName
+  ftv   :: a -> Set.Set TypeVar
 
 instance Substitutable Type where
   apply s ty@(TypeVar a)     = Map.findWithDefault ty a s
@@ -128,13 +128,13 @@ mgu (CustomType name1 ts1) (CustomType name2 ts2)
 mgu a b | a == b = pure nullSubst
 mgu t1 t2 = throwError $ UnificationFail t1 t2
 
-bind :: (Monad a) => TypeVarName -> Type -> ExceptT TypeError a Subst
+bind :: (Monad a) => TypeVar -> Type -> ExceptT TypeError a Subst
 bind a t
   | t == TypeVar a     = pure nullSubst
   | occursCheck a t = throwError $ InfiniteType a t
   | otherwise       = pure $ Map.singleton a t
 
-occursCheck ::  Substitutable a => TypeVarName -> a -> Bool
+occursCheck ::  Substitutable a => TypeVar -> a -> Bool
 occursCheck a t = a `Set.member` ftv t
 
 getSubst :: Infer Subst
@@ -150,16 +150,13 @@ unify t1 t2 = do
   u <- mgu (apply s t1) (apply s t2)
   extSubst u
 
-letters :: [String]
-letters = [1..] >>= flip replicateM ['a'..'z']
-
 fresh :: Infer Type
 fresh = do
   (s, u) <- get
   put (s, u{count = count u + 1})
-  pure $ TypeVar (letters !! count u)
+  pure $ TypeVar $ count u
 
-instantiate ::  Scheme -> Infer Type
+instantiate :: Scheme -> Infer Type
 instantiate (Forall as ty) = do
   as' <- mapM (const fresh) as
   let s = Map.fromList $ zip as as'
@@ -270,3 +267,10 @@ runInferSeq env (defs : rest) = do
   restTypes <- runInferSeq (env `union` TypeEnv (Map.fromList types)) rest
   pure $ types ++ restTypes
 runInferSeq _ [] = pure []
+
+exmpDefs = [
+              ("foo", LambdaExpr "x2" () Unrestricted $ ApplyExpr (ApplyExpr (NameExpr "plus") (ApplyExpr (NameExpr "idd") (NameExpr "x2"))) $ LitExpr (IntegerLiteral 0)),
+              ("idd", LambdaExpr "x1" () Unrestricted $ ApplyExpr (ApplyExpr (NameExpr "const") (NameExpr "x1")) (ApplyExpr (NameExpr "foo") $ LitExpr (IntegerLiteral 0)))
+
+              ,("const", LambdaExpr "x3" () Unrestricted $ LambdaExpr "y" () Unrestricted (NameExpr "x3"))
+           ]

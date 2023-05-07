@@ -1,7 +1,8 @@
 module Types where
 import Algebra (Modality)
+import GHC.Natural (Natural)
 
-type TypeVarName = String
+type TypeVar = Natural
 
 type TypeName = String
 
@@ -28,5 +29,5 @@ data Type
     = (Modality, Type) :-> Type
     | PrimType PrimType
     | CustomType TypeName [Type]
-    | TypeVar TypeVarName
+    | TypeVar TypeVar
     deriving (Eq, Show, Ord)
