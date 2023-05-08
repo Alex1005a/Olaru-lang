@@ -12,6 +12,7 @@ dependencies:
 - containers
 - deepseq
 - mtl
+- megaparsec
 
 ghc-options:
 - -Wall

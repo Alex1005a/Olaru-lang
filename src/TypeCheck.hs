@@ -172,8 +172,8 @@ prims = TypeEnv $ Map.fromList
     ("plus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
     ("mult", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
     ("minus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
-    ("True", Forall [] $ CustomType "Bool"[]),
-    ("False", Forall [] $ CustomType "Bool"[])
+    ("True", Forall [] $ CustomType "Bool" []),
+    ("False", Forall [] $ CustomType "Bool" [])
   ]
 
 lookupEnv :: TypeEnv -> Name -> Infer Type
@@ -218,7 +218,7 @@ infer env ex = case ex of
         ) (patTy, tv) casesInfer
     pure ty
 
-  LitExpr l  -> pure $ litType l
+  LitExpr l -> pure $ litType l
 
 inferPatternDef :: TypeEnv -> (Pattern, Expr ()) -> Infer (Type, Type)
 inferPatternDef  env (pat, caseExpr) = do
@@ -267,10 +267,3 @@ runInferSeq env (defs : rest) = do
   restTypes <- runInferSeq (env `union` TypeEnv (Map.fromList types)) rest
   pure $ types ++ restTypes
 runInferSeq _ [] = pure []
-
-exmpDefs = [
-              ("foo", LambdaExpr "x2" () Unrestricted $ ApplyExpr (ApplyExpr (NameExpr "plus") (ApplyExpr (NameExpr "idd") (NameExpr "x2"))) $ LitExpr (IntegerLiteral 0)),
-              ("idd", LambdaExpr "x1" () Unrestricted $ ApplyExpr (ApplyExpr (NameExpr "const") (NameExpr "x1")) (ApplyExpr (NameExpr "foo") $ LitExpr (IntegerLiteral 0)))
-
-              ,("const", LambdaExpr "x3" () Unrestricted $ LambdaExpr "y" () Unrestricted (NameExpr "x3"))
-           ]

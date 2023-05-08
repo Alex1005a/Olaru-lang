@@ -20,12 +20,9 @@ constructorArity = arity . constructorType
 
 type ConstructorMap = Map Name ConstructorInfo
 
-data AST = AST ConstructorMap [ValueDefinition] deriving (Eq, Show)
+type Env = Map Name Value
 
-data ValueDefinition
-  = TypeAnnotation Name Type
-  | NameDefinition Name (Expr Type) 
-  deriving (Eq, Show)
+type ExprMap = Map Name (Expr Type)
 
 data Value
   = LitVal Literal
@@ -43,15 +40,6 @@ instance Eq Value where
     (Constructor name1 vals1) == (Constructor name2 vals2) = (name1 == name2) && (vals1 == vals2)
     _ == _ = False
 
-type Env = Map Name Value
-
-getNameDefinition :: Name -> [ValueDefinition] -> Maybe ValueDefinition
-getNameDefinition name (TypeAnnotation {} : rest) = getNameDefinition name rest
-getNameDefinition name (NameDefinition nameDef expr : rest) =
-    if name == nameDef then Just (NameDefinition nameDef expr)
-    else getNameDefinition name rest
-getNameDefinition _ _ = Nothing
-
 createConstructorClosure :: [Value] -> Int -> Name -> Value
 createConstructorClosure vals 0 name = Constructor name vals
 createConstructorClosure vals n name = Closure $ \v -> createConstructorClosure (vals ++ [v]) (n - 1) name
@@ -68,7 +56,7 @@ integerClosure f = Closure $ \v1 -> Closure $ \v2 ->
         _ -> error "Not two int"
 
 matchValues :: Value -> [(Pattern, Expr Type)] -> ConstructorMap -> Maybe ([(Name, Value)], Expr Type)
-matchValues _ ((Default, expr) : rest) _ = Just ([], expr)
+matchValues _ ((Default, expr) : _) _ = Just ([], expr)
 matchValues val ((LiteralPattern lit, expr) : rest) constructs =
     if val == LitVal lit then Just ([], expr)
     else matchValues val rest constructs
@@ -77,7 +65,7 @@ matchValues val@(Constructor nameConst vals) ((ConstructorPattern namePat names,
     else matchValues val rest constructs
 matchValues _ _ _ = Nothing
 
-eval :: Expr Type -> AST -> Env -> Maybe Value
+eval :: Expr Type -> (ExprMap, ConstructorMap) -> Env -> Maybe Value
 eval (LitExpr lit) _ _ = Just $ LitVal lit
 eval (LambdaExpr arg _ _ expr) ast env = pure . Closure $ \v -> v `deepseq` fromJust $ eval expr ast (insert arg v env)
 eval (ApplyExpr f x) ast env = do
@@ -87,18 +75,18 @@ eval (ApplyExpr f x) ast env = do
 eval (NameExpr "plus") _ _ = pure $ integerClosure (+)
 eval (NameExpr "mult") _ _ = pure $ integerClosure (*)
 eval (NameExpr "minus") _ _ = pure $ integerClosure (-)
-eval (NameExpr name) ast@(AST constructs values) env =
+eval (NameExpr name) (exprs, constructs) env =
     constructorClosure name constructs
     <|> (do
-    (NameDefinition _ expr) <- getNameDefinition name values
-    eval expr ast empty)
+    expr <- lookup name exprs
+    eval expr (exprs, constructs) empty)
     <|> lookup name env
-eval (CaseExpr expr patterns) ast@(AST constructs _) env = do
-    val <- eval expr ast env
+eval (CaseExpr expr patterns) (exprs, constructs) env = do
+    val <- eval expr (exprs, constructs) env
     (vars, patExpr) <- matchValues val patterns constructs
-    eval patExpr ast (fromList vars `union` env)
+    eval patExpr (exprs, constructs) (fromList vars `union` env)
 
-evalName :: Name -> AST -> Maybe Value
-evalName name ast@(AST _ values) = do
-    (NameDefinition nameDef expr) <- getNameDefinition name values
-    eval expr ast empty
+evalName :: Name -> (ExprMap, ConstructorMap) -> Maybe Value
+evalName name (exprs, constructs) = do
+    expr <- lookup name exprs
+    eval expr (exprs, constructs) empty

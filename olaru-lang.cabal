@@ -25,6 +25,7 @@ library
       Eval
       Expressions
       ModalCheck
+      Parser
       SortDefs
       TypeCheck
       Types
@@ -37,6 +38,7 @@ library
       base >=4.7 && <5
     , containers
     , deepseq
+    , megaparsec
     , mtl
   default-language: Haskell2010
 
@@ -51,6 +53,7 @@ executable olaru-lang-exe
       base >=4.7 && <5
     , containers
     , deepseq
+    , megaparsec
     , mtl
     , olaru-lang
   default-language: Haskell2010
@@ -67,6 +70,7 @@ test-suite olaru-lang-test
       base >=4.7 && <5
     , containers
     , deepseq
+    , megaparsec
     , mtl
     , olaru-lang
   default-language: Haskell2010
