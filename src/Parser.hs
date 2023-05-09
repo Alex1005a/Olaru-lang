@@ -2,14 +2,10 @@ module Parser where
 
 import Expressions (Pattern (..), Literal (CharLiteral, IntegerLiteral))
 import Types (Type)
-import Text.Megaparsec (Parsec, (<|>), empty, some, many, choice, sepBy, between, runParser)
+import Text.Megaparsec (Parsec, (<|>), some, many, choice, sepBy, between)
 import Data.Void (Void)
 import qualified Text.Megaparsec.Char.Lexer as L
-import Data.Char (isSpace, isLower)
-import Control.Monad (void)
 import Text.Megaparsec.Char (string, space1, alphaNumChar, letterChar, char)
-import qualified Text.Megaparsec.Error
-import Data.Bifunctor (first)
 
 type Parser = Parsec Void String
 
@@ -32,22 +28,21 @@ data Definition
 
 data ConstructorDefinition = ConstructorDefinition ConstructorName [Type] deriving (Eq, Show)
 
-data ValueDefinition = NameDefinition ValName Expr
+data ValueDefinition = NameDefinition ValName SugarExpr
   deriving (Eq, Show)
 
-data Expr
-  = LambdaExpr [ValName] Expr
+data SugarExpr
+  = LambdaExpr [ValName] SugarExpr
   | NameExpr Name
   | LitExpr Literal
-  | ApplyExpr Expr [Expr]
-  | CaseExpr Expr [(Pattern, Expr)]
+  | ApplyExpr SugarExpr [SugarExpr]
+  | CaseExpr SugarExpr [(Pattern, SugarExpr)]
   deriving (Eq, Show)
 
 literal :: Parser Literal
 literal = intLit <|> charLit
   where
     intLit = IntegerLiteral <$> L.decimal
-
     charLit = CharLiteral <$> apostrophed L.charLiteral
 
 sc :: Parser ()
@@ -60,7 +55,7 @@ varChar :: Parser Char
 varChar = alphaNumChar <|> char '_'
 
 varName :: Parser Name
-varName = some letterChar--(:) <$> letterChar <*> many varChar
+varName = some letterChar
 
 onePattern  :: Parser Pattern
 onePattern  = choice [litPat, conPat, wildcardPat]
@@ -78,19 +73,22 @@ braces = between (char '{') (char '}')
 apostrophed :: Parser a -> Parser a
 apostrophed = between (char '\'') (char '\'')
 
-expr :: Parser Expr
+expr :: Parser SugarExpr
 expr = choice [lambdaExpr, appExpr, caseExpr]
-  where
-    lambdaExpr =
-      LambdaExpr
-        <$> (char '\\' *> some (sc *> varName <* sc) <* sc <* string "->" <* sc)
-        <*> expr
-    caseExpr =
-      CaseExpr
-        <$> (string "case" *> sc *> expr <* string "of" <* sc)
-        <*> braces (sepBy ((,) <$> onePattern <* sc <* string "->" <* sc <*> expr) (char ';' <* sc))
 
-appExpr :: Parser Expr
+lambdaExpr :: Parser SugarExpr
+lambdaExpr =
+  LambdaExpr
+    <$> (char '\\' *> some (sc *> varName <* sc) <* sc <* string "->" <* sc)
+    <*> expr
+
+caseExpr :: Parser SugarExpr
+caseExpr =
+  CaseExpr
+    <$> (string "case" *> sc *> expr <* string "of" <* sc)
+    <*> braces (sepBy ((,) <$> onePattern <* sc <* string "->" <* sc <*> expr) (char ';' <* sc))
+
+appExpr :: Parser SugarExpr
 appExpr = do
   exprs <- some (sc *> factor <* sc)
   pure $ case exprs of 
@@ -98,7 +96,7 @@ appExpr = do
     e : es -> ApplyExpr e es
     [] -> error "empty list in appExpr"
 
-factor :: Parser Expr
+factor :: Parser SugarExpr
 factor = littExpr <|> nameExpr <|> parens expr
   where
     littExpr = LitExpr <$> literal
