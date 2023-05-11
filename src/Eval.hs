@@ -5,24 +5,17 @@ import Expressions
 import GHC.Generics (Generic)
 import Control.DeepSeq (NFData, deepseq)
 import Data.Map (Map, insert, lookup, empty, fromList, union)
-import Types (Type, arity)
 import Prelude hiding (lookup)
 import Data.Maybe (fromJust)
 import Control.Applicative ((<|>))
 
-newtype ConstructorInfo = ConstructorInfo
-  {
-    constructorType :: Type
-  } deriving (Eq, Show)
+type ConstructorArity = Int
 
-constructorArity :: ConstructorInfo -> Int
-constructorArity = arity . constructorType
-
-type ConstructorMap = Map Name ConstructorInfo
+type ConstructorMap = Map Name ConstructorArity
 
 type Env = Map Name Value
 
-type ExprMap = Map Name (Expr Type)
+type ExprMap a = Map Name (Expr a)
 
 data Value
   = LitVal Literal
@@ -47,7 +40,7 @@ createConstructorClosure vals n name = Closure $ \v -> createConstructorClosure 
 constructorClosure :: Name -> ConstructorMap -> Maybe Value
 constructorClosure name constructs = do
     info <- lookup name constructs
-    pure $ createConstructorClosure [] (constructorArity info) name
+    pure $ createConstructorClosure [] info name
 
 integerClosure :: (Integer -> Integer -> Integer) -> Value
 integerClosure f = Closure $ \v1 -> Closure $ \v2 ->
@@ -55,7 +48,7 @@ integerClosure f = Closure $ \v1 -> Closure $ \v2 ->
         (LitVal (IntegerLiteral int1), LitVal (IntegerLiteral int2)) -> LitVal $ IntegerLiteral (f int1 int2)
         _ -> error "Not two int"
 
-matchValues :: Value -> [(Pattern, Expr Type)] -> ConstructorMap -> Maybe ([(Name, Value)], Expr Type)
+matchValues :: Value -> [(Pattern, Expr a)] -> ConstructorMap -> Maybe ([(Name, Value)], Expr a)
 matchValues _ ((Default, expr) : _) _ = Just ([], expr)
 matchValues val ((LiteralPattern lit, expr) : rest) constructs =
     if val == LitVal lit then Just ([], expr)
@@ -65,7 +58,7 @@ matchValues val@(Constructor nameConst vals) ((ConstructorPattern namePat names,
     else matchValues val rest constructs
 matchValues _ _ _ = Nothing
 
-eval :: Expr Type -> (ExprMap, ConstructorMap) -> Env -> Maybe Value
+eval :: Expr a -> (ExprMap a, ConstructorMap) -> Env -> Maybe Value
 eval (LitExpr lit) _ _ = Just $ LitVal lit
 eval (LambdaExpr arg _ _ expr) ast env = pure . Closure $ \v -> v `deepseq` fromJust $ eval expr ast (insert arg v env)
 eval (ApplyExpr f x) ast env = do
@@ -86,7 +79,7 @@ eval (CaseExpr expr patterns) (exprs, constructs) env = do
     (vars, patExpr) <- matchValues val patterns constructs
     eval patExpr (exprs, constructs) (fromList vars `union` env)
 
-evalName :: Name -> (ExprMap, ConstructorMap) -> Maybe Value
+evalName :: Name -> (ExprMap a, ConstructorMap) -> Maybe Value
 evalName name (exprs, constructs) = do
     expr <- lookup name exprs
     eval expr (exprs, constructs) empty

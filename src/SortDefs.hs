@@ -7,6 +7,8 @@ import Data.Graph ( buildG, scc, Forest, Tree(..) )
 import Data.Maybe (fromJust)
 import Data.Bifunctor (bimap, Bifunctor (..))
 
+type MutualDefs a = [(Name, Expr a)]
+
 allCalls :: Set.Set Name -> Expr a -> Set.Set Name
 allCalls defs (NameExpr name)
     | name `Set.member` defs = Set.singleton name
@@ -29,7 +31,7 @@ sortFuns funs calls =
       lst = forestToList forest in
   map (map (`Set.elemAt` funs)) lst
 
-sortDefs :: [(Name, Expr a)] -> [[(Name, Expr a)]]
+sortDefs :: [(Name, Expr a)] -> [MutualDefs a]
 sortDefs defs =
     let funs = Set.fromList $ map fst defs
         calls = concatMap (\(name, expr) -> map (name,) $ Set.toList (allCalls funs expr)) defs

@@ -40,34 +40,6 @@ checkUsageCount m name usage = do
       Relevant -> when (countUsage == 0) $ throwError usageErr
       Zero -> when (countUsage /= 0) $ throwError usageErr
 
-mcheck :: Modality -> LocalEnv -> Expr Type -> Check (Type, Usage, LocalEnv)
-mcheck m locEnv (NameExpr name) = do
-    defLookup <- asks $ lookup name
-    let lookupResult = ((, [name]) <$> lookup name locEnv) <|> ((, []) <$> defLookup)
-    ((ty, varM), usage) <- throwFromMaybe (UnboundVariable name) lookupResult
-    unless (more m varM) $ throwError (IncorrectModalityContext name m varM)
-    pure (ty, usage, locEnv)
-mcheck m locEnv (ApplyExpr fun arg) = do
-    (funTy, funUsed, funNewEnv) <- mcheck m locEnv fun
-    case funTy of
-        ((am, _) :-> retTy) -> do
-            (_, argUsed, argNewEnv) <- mcheck (mult am m) funNewEnv arg
-            pure (retTy, funUsed ++ argUsed, argNewEnv)
-        _ -> throwError ApplicationToNonFunction
-mcheck _ locEnv (LambdaExpr argName argTy argM expr) = do
-    (retTy, used, newLocEnv) <- mcheck argM (insert argName (argTy, argM) locEnv) expr
-    checkUsageCount (snd $ fromJust $ lookup argName newLocEnv) argName used
-    pure ((argM, argTy) :-> retTy, filter (/= argName) used, filterWithKey (\k _ -> k /= argName) newLocEnv)
-mcheck _ locEnv (LitExpr l) = pure (litType l, [], locEnv)
-mcheck m locEnv (CaseExpr matchExpr pats) = do
-    (_, matchUsed, newLocEnv) <- mcheck m locEnv matchExpr
-    caseCheckedWithTy <- traverse (\pe -> checkCase m pe newLocEnv) pats
-    let ty = fst $ head caseCheckedWithTy
-    let caseChecked = groupByFst $ concatMap snd caseCheckedWithTy
-    newLocList <- mapM combineUsages caseChecked
-    let newLoc = fromList $ second argUsageToModality <$> newLocList
-    pure (ty, matchUsed, mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)) locEnv)
-
 groupByFst :: (Ord a) => [(a, b)] -> [[(a, b)]]
 groupByFst = groupBy ((==) `on` fst)
            . sortBy (comparing fst)
@@ -134,3 +106,31 @@ checkCase m (pat, caseExpr) locEnv = do
     argUsage <- mapM (\(locName, (_, locM)) -> (locName,) <$> locsArgUsage locName locM used)
       $ filter (`notElem` newLocs) $ toList newLocEnv
     pure (ty, argUsage)
+
+mcheck :: Modality -> LocalEnv -> Expr Type -> Check (Type, Usage, LocalEnv)
+mcheck m locEnv (NameExpr name) = do
+    defLookup <- asks $ lookup name
+    let lookupResult = ((, [name]) <$> lookup name locEnv) <|> ((, []) <$> defLookup)
+    ((ty, varM), usage) <- throwFromMaybe (UnboundVariable name) lookupResult
+    unless (more m varM) $ throwError (IncorrectModalityContext name m varM)
+    pure (ty, usage, locEnv)
+mcheck m locEnv (ApplyExpr fun arg) = do
+    (funTy, funUsed, funNewEnv) <- mcheck m locEnv fun
+    case funTy of
+        ((am, _) :-> retTy) -> do
+            (_, argUsed, argNewEnv) <- mcheck (mult am m) funNewEnv arg
+            pure (retTy, funUsed ++ argUsed, argNewEnv)
+        _ -> throwError ApplicationToNonFunction
+mcheck _ locEnv (LambdaExpr argName argTy argM expr) = do
+    (retTy, used, newLocEnv) <- mcheck argM (insert argName (argTy, argM) locEnv) expr
+    checkUsageCount (snd $ fromJust $ lookup argName newLocEnv) argName used
+    pure ((argM, argTy) :-> retTy, filter (/= argName) used, filterWithKey (\k _ -> k /= argName) newLocEnv)
+mcheck _ locEnv (LitExpr l) = pure (litType l, [], locEnv)
+mcheck m locEnv (CaseExpr matchExpr pats) = do
+    (_, matchUsed, newLocEnv) <- mcheck m locEnv matchExpr
+    caseCheckedWithTy <- traverse (\pe -> checkCase m pe newLocEnv) pats
+    let ty = fst $ head caseCheckedWithTy
+    let caseChecked = groupByFst $ concatMap snd caseCheckedWithTy
+    newLocList <- mapM combineUsages caseChecked
+    let newLoc = fromList $ second argUsageToModality <$> newLocList
+    pure (ty, matchUsed, mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)) locEnv)

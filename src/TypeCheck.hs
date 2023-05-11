@@ -8,7 +8,7 @@ import qualified Data.Set as Set
 import Types
 import Algebra
 import Expressions ( Expr(..), Literal(..), Name, Pattern(..) )
-import SortDefs (sortDefs)
+import SortDefs (sortDefs, MutualDefs)
 import Control.Monad.Except
     ( ExceptT,
       foldM,
@@ -24,6 +24,9 @@ import GHC.Natural (Natural)
 
 data Scheme = Forall [TypeVar] Type
   deriving (Show, Eq, Ord)
+
+schemeArity :: Scheme -> Int
+schemeArity (Forall _ ty) = arity ty
 
 newtype TypeEnv = TypeEnv (Map.Map Name Scheme)
   deriving (Semigroup, Monoid, Show)
@@ -166,16 +169,6 @@ generalize :: TypeEnv -> Type -> Scheme
 generalize env ty  = Forall as ty
   where as = Set.toList $ ftv ty `Set.difference` ftv env
 
-prims :: TypeEnv
-prims = TypeEnv $ Map.fromList
-  [
-    ("plus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
-    ("mult", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
-    ("minus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
-    ("True", Forall [] $ CustomType "Bool" []),
-    ("False", Forall [] $ CustomType "Bool" [])
-  ]
-
 lookupEnv :: TypeEnv -> Name -> Infer Type
 lookupEnv (TypeEnv env) x = do
   case Map.lookup x env of
@@ -240,6 +233,16 @@ zipWithNames env ((_, argTy) :-> retTy) (name : restNames) =
 zipWithNames env ty [] = pure (env, ty)
 zipWithNames _ _ _ = throwError ContructorPatArgsMismatch
 
+prims :: TypeEnv
+prims = TypeEnv $ Map.fromList
+  [
+    ("plus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
+    ("mult", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
+    ("minus", Forall [] $ (Unrestricted, PrimType IntegerType) :-> (Unrestricted, PrimType IntegerType) :-> PrimType IntegerType),
+    ("True", Forall [] $ CustomType "Bool" []),
+    ("False", Forall [] $ CustomType "Bool" [])
+  ]
+
 inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
 inferExpr env = runInfer . infer env
 
@@ -254,14 +257,14 @@ inferTop env defs = do
   zipWithM_ unify ts types
   pure $ zip is types
 
-runInferMutualTop :: TypeEnv -> [(Name, Expr ())] -> Either TypeError [(Name, Scheme)]
+runInferMutualTop :: TypeEnv -> MutualDefs () -> Either TypeError [(Name, Scheme)]
 runInferMutualTop env defs = do
   let inferDefs = inferTop env defs
   case runState (runExceptT inferDefs) (nullSubst, initUnique) of
     (Left err, _)  -> Left err
     (Right defsSchemed, (s, _)) -> Right ((\(n, ty) -> (n, closeOver (s, ty))) <$> defsSchemed)
 
-runInferSeq :: TypeEnv -> [[(Name, Expr ())]] -> Either TypeError [(Name, Scheme)]
+runInferSeq :: TypeEnv -> [MutualDefs ()] -> Either TypeError [(Name, Scheme)]
 runInferSeq env (defs : rest) = do
   types <- runInferMutualTop env defs
   restTypes <- runInferSeq (env `union` TypeEnv (Map.fromList types)) rest
