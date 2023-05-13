@@ -3,13 +3,13 @@ module ModalCheck where
 
 import Expressions (Name, Expr (NameExpr, ApplyExpr, LambdaExpr, LitExpr, CaseExpr), Pattern (ConstructorPattern))
 import Algebra (Modality (Unrestricted, Linear, Affine, Relevant, Zero), more, mult)
-import Data.Map (Map, lookup, insert, fromList, union, toList, filterWithKey, mapWithKey)
-import TypeCheck (TypeError (IncorrectModalityContext, UnboundVariable, ApplicationToNonFunction, UsageModality, InconsistentUsage), litType)
+import Data.Map (Map, lookup, insert, fromList, union, toList, filterWithKey, mapWithKey, empty, map)
+import TypeCheck (TypeError (IncorrectModalityContext, UnboundVariable, ApplicationToNonFunction, UsageModality, InconsistentUsage), litType, Scheme (Forall), prims, TypeEnv (TypeEnv))
 import Control.Monad (unless, when)
-import Control.Monad.Except (throwError, ExceptT)
+import Control.Monad.Except (throwError, ExceptT, runExceptT)
 import Prelude hiding (lookup)
 import Types (Type ((:->)), funArgs)
-import Control.Monad.Reader (Reader, asks)
+import Control.Monad.Reader (Reader, asks, runReader)
 import Control.Applicative ((<|>))
 import Data.Maybe (fromJust)
 import Data.List (groupBy, sortBy)
@@ -134,3 +134,11 @@ mcheck m locEnv (CaseExpr matchExpr pats) = do
     newLocList <- mapM combineUsages caseChecked
     let newLoc = fromList $ second argUsageToModality <$> newLocList
     pure (ty, matchUsed, mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)) locEnv)
+
+runMcheck :: [(Name, Expr Type, Scheme)] -> Either TypeError [(Type, Usage, LocalEnv)]
+runMcheck defs =
+  let envDef = fromList $ (\(n, _, Forall _ ty) -> (n, (ty, Unrestricted))) <$> defs in
+  let checkDefs = mapM (mcheck Linear empty) ((\(_, exprTy, _) -> exprTy) <$> defs) in
+  let TypeEnv primsModal = prims in
+    let primsModal' = Data.Map.map (\(Forall _ ty) -> (ty, Unrestricted)) primsModal in
+  runReader (runExceptT checkDefs) (primsModal' `union` envDef)

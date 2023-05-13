@@ -47,10 +47,10 @@ data TypeError
   | ContructorPatArgsMismatch
   deriving (Show, Eq)
 
-runInfer :: Infer Type -> Either TypeError Scheme
+runInfer :: Infer (Expr Type, Type) -> Either TypeError (Expr Type, Scheme)
 runInfer m = case runState (runExceptT m) (nullSubst, initUnique) of
   (Left err, _)  -> Left err
-  (Right ty, (s, _)) -> Right (closeOver (s, ty))
+  (Right (exprTy, ty), (s, _)) -> Right (exprTy, closeOver (s, ty))
 
 closeOver :: (Subst, Type) -> Scheme
 closeOver (sub, ty) = normalize $ apply sub ty
@@ -183,41 +183,41 @@ argModality :: Type -> Modality
 argModality ((m, _) :-> _) = m
 argModality _ = Unrestricted
 
-infer :: TypeEnv -> Expr () -> Infer Type
+infer :: TypeEnv -> Expr () -> Infer (Expr Type, Type)
 infer env ex = case ex of
-  NameExpr x -> lookupEnv env x
+  NameExpr x -> (NameExpr x,) <$> lookupEnv env x
 
   LambdaExpr x _ argM e -> do
     tv <- fresh
     let env' = env `extend` (x, Forall [] tv)
-    ty <- infer env' e
-    pure ((argM, tv) :-> ty)
+    (eTy, ty) <- infer env' e
+    pure (LambdaExpr x tv argM eTy, (argM, tv) :-> ty)
 
   ApplyExpr f arg -> do
     tv <- fresh
-    funTy <- infer env f
-    argTy <- infer env arg
+    (funExpr, funTy) <- infer env f
+    (argExpr, argTy )<- infer env arg
     unify ((argModality argTy, argTy) :-> tv) funTy
-    return tv
+    return (ApplyExpr funExpr argExpr, tv)
 
   CaseExpr expr patterns -> do
-    patTy <- infer env expr
+    (matchExpr, patTy) <- infer env expr
     casesInfer <- forM patterns (inferPatternDef env)
     tv <- fresh
     (_, ty) <- foldrM (\(patTy2, caseTy) (patTy1, ty) -> do
           unify ty caseTy
           unify patTy1 patTy2
           pure (patTy1, ty)
-        ) (patTy, tv) casesInfer
-    pure ty
+        ) (patTy, tv) $ (\(a, r, _) -> (a, r)) <$> casesInfer
+    pure (CaseExpr matchExpr (zipWith (\(_, _, t) (p, _) -> (p, t)) casesInfer patterns), ty )
 
-  LitExpr l -> pure $ litType l
+  LitExpr l -> pure (LitExpr l, litType l)
 
-inferPatternDef :: TypeEnv -> (Pattern, Expr ()) -> Infer (Type, Type)
+inferPatternDef :: TypeEnv -> (Pattern, Expr ()) -> Infer (Type, Type, Expr Type)
 inferPatternDef  env (pat, caseExpr) = do
   (newEnv, patTy) <- inspectPattern env pat
-  retTy <- infer newEnv caseExpr
-  pure (patTy, retTy)
+  (retExpr, retTy) <- infer newEnv caseExpr
+  pure (patTy, retTy, retExpr)
 
 inspectPattern :: TypeEnv -> Pattern -> Infer (TypeEnv, Type)
 inspectPattern env pat = case pat of
@@ -243,30 +243,31 @@ prims = TypeEnv $ Map.fromList
     ("False", Forall [] $ CustomType "Bool" [])
   ]
 
-inferExpr :: TypeEnv -> Expr () -> Either TypeError Scheme
+inferExpr :: TypeEnv -> Expr () -> Either TypeError (Expr Type, Scheme)
 inferExpr env = runInfer . infer env
 
-inferTop :: TypeEnv -> [(Name, Expr ())] -> Infer [(Name, Type)]
+inferTop :: TypeEnv -> [(Name, Expr ())] -> Infer [(Name, Expr Type, Type)]
 inferTop env defs = do
   ts <- mapM (const fresh) defs
   let scs = map (Forall []) ts
       is = map fst defs
       extEnv = env `union` TypeEnv (Map.fromList $ zip is scs)
   let exprs = map snd defs
-  types <- mapM (infer extEnv) exprs
+  inferResult <- mapM (infer extEnv) exprs
+  let (typesExprs, types) = unzip inferResult
   zipWithM_ unify ts types
-  pure $ zip is types
+  pure $ zip3 is typesExprs types
 
-runInferMutualTop :: TypeEnv -> MutualDefs () -> Either TypeError [(Name, Scheme)]
+runInferMutualTop :: TypeEnv -> MutualDefs () -> Either TypeError [(Name, Expr Type, Scheme)]
 runInferMutualTop env defs = do
   let inferDefs = inferTop env defs
   case runState (runExceptT inferDefs) (nullSubst, initUnique) of
     (Left err, _)  -> Left err
-    (Right defsSchemed, (s, _)) -> Right ((\(n, ty) -> (n, closeOver (s, ty))) <$> defsSchemed)
+    (Right defsSchemed, (s, _)) -> Right ((\(n, exprTy, ty) -> (n, exprTy, closeOver (s, ty))) <$> defsSchemed)
 
-runInferSeq :: TypeEnv -> [MutualDefs ()] -> Either TypeError [(Name, Scheme)]
+runInferSeq :: TypeEnv -> [MutualDefs ()] -> Either TypeError [(Name, Expr Type, Scheme)]
 runInferSeq env (defs : rest) = do
   types <- runInferMutualTop env defs
-  restTypes <- runInferSeq (env `union` TypeEnv (Map.fromList types)) rest
+  restTypes <- runInferSeq (env `union` TypeEnv (Map.fromList ((\(n, _, sch) -> (n, sch)) <$> types))) rest
   pure $ types ++ restTypes
 runInferSeq _ [] = pure []

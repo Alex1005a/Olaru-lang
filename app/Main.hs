@@ -7,6 +7,7 @@ import TypeCheck
     ( prims, runInferSeq, union, TypeEnv(TypeEnv), schemeArity )
 import Eval (evalName)
 import qualified Data.Map as Map
+import ModalCheck (runMcheck)
 
 main :: IO ()
 main = do
@@ -14,6 +15,6 @@ main = do
     let ast = fromRight (error "Parse fail") $ astParse code
     let (defs, conMap) = fromRight (error "Desugar fail") $ desugar ast
     let sortedDefs = sortDefs defs
-    print $ fromRight (error "TypeCheck fail") $ runInferSeq (TypeEnv conMap `union` prims) sortedDefs
-    -- There should be a modal check here
+    let tyCheckResult = fromRight (error "TypeCheck fail") $ runInferSeq (TypeEnv conMap `union` prims) sortedDefs
+    print $ fromRight (error "ModalCheck fail") $ runMcheck tyCheckResult
     print $ evalName "main" (Map.fromList defs, Map.map schemeArity conMap)
