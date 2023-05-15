@@ -3,19 +3,20 @@ module ModalCheck where
 
 import Expressions (Name, Expr (NameExpr, ApplyExpr, LambdaExpr, LitExpr, CaseExpr), Pattern (ConstructorPattern))
 import Algebra (Modality (Unrestricted, Linear, Affine, Relevant, Zero), more, mult)
-import Data.Map (Map, lookup, insert, fromList, union, toList, filterWithKey, mapWithKey, empty, map)
+import Data.Map (Map, lookup, insert, fromList, union, toList, filterWithKey, mapWithKey, map, empty)
 import TypeCheck (TypeError (IncorrectModalityContext, UnboundVariable, ApplicationToNonFunction, UsageModality, InconsistentUsage), litType, Scheme (Forall), prims, TypeEnv (TypeEnv))
 import Control.Monad (unless, when)
 import Control.Monad.Except (throwError, ExceptT, runExceptT)
 import Prelude hiding (lookup)
 import Types (Type ((:->)), funArgs)
-import Control.Monad.Reader (Reader, asks, runReader)
+import Control.Monad.Reader (asks, ReaderT (runReaderT))
 import Control.Applicative ((<|>))
 import Data.Maybe (fromJust)
 import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
 import Data.Function (on)
 import Data.Bifunctor (second)
+import Control.Monad.State (State, modify, MonadState (get), evalState)
 
 type Usage = [Name]
 
@@ -23,7 +24,7 @@ type LocalEnv = Map Name (Type, Modality)
 
 type EnvDef = Map Name (Type, Modality)
 
-type Check = ExceptT TypeError (Reader EnvDef)
+type Check = ExceptT TypeError (ReaderT EnvDef (State LocalEnv))
 
 checkUsageCount :: Modality -> Name -> Usage -> Check ()
 checkUsageCount m name usage = do
@@ -88,8 +89,8 @@ locsArgUsage name m used = do
         when (countUsage /= 0) $ throwError usageErr
         pure Use0
 
-checkCase :: Modality -> (Pattern, Expr Type) -> LocalEnv -> Check (Type, [(Name, ArgUsage)])
-checkCase m (pat, caseExpr) locEnv = do
+checkCase :: Modality -> (Pattern, Expr Type) -> Check (Type, [(Name, ArgUsage)])
+checkCase m (pat, caseExpr)  = do
     newLocs <- case pat of
       ConstructorPattern conName args -> do
         conLookup <- asks $ lookup conName
@@ -97,44 +98,51 @@ checkCase m (pat, caseExpr) locEnv = do
         unless (more m conM) $ throwError (IncorrectModalityContext conName m conM)
         pure $ zip args $ funArgs conTy
       _ -> pure []
-    (ty, used, newLocEnv) <- mcheck m (union locEnv $ fromList newLocs) caseExpr
+    modify (\locEnv -> union locEnv $ fromList newLocs)
+    (ty, used) <- mcheck m caseExpr
+    newLocEnv <- get
     mapM_ (\(argName, _) -> checkUsageCount (snd $ fromJust $ lookup argName newLocEnv) argName used) newLocs
     argUsage <- mapM (\(locName, (_, locM)) -> (locName,) <$> locsArgUsage locName locM used)
       $ filter (`notElem` newLocs) $ toList newLocEnv
     pure (ty, argUsage)
 
-mcheck :: Modality -> LocalEnv -> Expr Type -> Check (Type, Usage, LocalEnv)
-mcheck m locEnv (NameExpr name) = do
+mcheck :: Modality -> Expr Type -> Check (Type, Usage)
+mcheck m (NameExpr name) = do
     defLookup <- asks $ lookup name
+    locEnv <- get
     let lookupResult = ((, [name]) <$> lookup name locEnv) <|> ((, []) <$> defLookup)
     ((ty, varM), usage) <- maybe (throwError $ UnboundVariable name) pure lookupResult
     unless (more m varM) $ throwError (IncorrectModalityContext name m varM)
-    pure (ty, usage, locEnv)
-mcheck m locEnv (ApplyExpr fun arg) = do
-    (funTy, funUsed, funNewEnv) <- mcheck m locEnv fun
+    pure (ty, usage)
+mcheck m (ApplyExpr fun arg) = do
+    (funTy, funUsed) <- mcheck m fun
     case funTy of
         ((am, _) :-> retTy) -> do
-            (_, argUsed, argNewEnv) <- mcheck (mult am m) funNewEnv arg
-            pure (retTy, funUsed ++ argUsed, argNewEnv)
+            (_, argUsed) <- mcheck (mult am m) arg
+            pure (retTy, funUsed ++ argUsed)
         _ -> throwError ApplicationToNonFunction
-mcheck _ locEnv (LambdaExpr argName argTy argM expr) = do
-    (retTy, used, newLocEnv) <- mcheck argM (insert argName (argTy, argM) locEnv) expr
-    checkUsageCount (snd $ fromJust $ lookup argName newLocEnv) argName used
-    pure ((argM, argTy) :-> retTy, filter (/= argName) used, filterWithKey (\k _ -> k /= argName) newLocEnv)
-mcheck _ locEnv (LitExpr l) = pure (litType l, [], locEnv)
-mcheck m locEnv (CaseExpr matchExpr pats) = do
-    (_, matchUsed, newLocEnv) <- mcheck m locEnv matchExpr
-    caseCheckedWithTy <- traverse (\pe -> checkCase m pe newLocEnv) pats
+mcheck _ (LambdaExpr argName argTy argM expr) = do
+    modify (insert argName (argTy, argM))
+    (retTy, used) <- mcheck argM expr
+    locEnv <- get
+    checkUsageCount (snd $ fromJust $ lookup argName locEnv) argName used
+    modify (filterWithKey (\k _ -> k /= argName))
+    pure ((argM, argTy) :-> retTy, filter (/= argName) used)
+mcheck _ (LitExpr l) = pure (litType l, [])
+mcheck m (CaseExpr matchExpr pats) = do
+    (_, matchUsed) <- mcheck m matchExpr
+    caseCheckedWithTy <- traverse (checkCase m) pats
     let ty = fst $ head caseCheckedWithTy
     let caseChecked = groupByFst $ concatMap snd caseCheckedWithTy
     newLocList <- mapM combineUsages caseChecked
     let newLoc = fromList $ second argUsageToModality <$> newLocList
-    pure (ty, matchUsed, mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)) locEnv)
+    modify (mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)))
+    pure (ty, matchUsed)
 
-runMcheck :: [(Name, Expr Type, Scheme)] -> Either TypeError [(Type, Usage, LocalEnv)]
+runMcheck :: [(Name, Expr Type, Scheme)] -> Either TypeError [(Type, Usage)]
 runMcheck defs =
   let envDef = fromList $ (\(n, _, Forall _ ty) -> (n, (ty, Unrestricted))) <$> defs in
-  let checkDefs = mapM (mcheck Linear empty) ((\(_, exprTy, _) -> exprTy) <$> defs) in
+  let checkDefs = mapM (mcheck Linear) ((\(_, exprTy, _) -> exprTy) <$> defs) in
   let TypeEnv primsModal = prims in
     let primsModal' = Data.Map.map (\(Forall _ ty) -> (ty, Unrestricted)) primsModal in
-  runReader (runExceptT checkDefs) (primsModal' `union` envDef)
+  evalState (runReaderT (runExceptT checkDefs) (primsModal' `union` envDef)) empty

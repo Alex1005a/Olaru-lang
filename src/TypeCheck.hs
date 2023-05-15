@@ -8,7 +8,7 @@ import qualified Data.Set as Set
 import Types
 import Algebra
 import Expressions ( Expr(..), Literal(..), Name, Pattern(..) )
-import SortDefs (sortDefs, MutualDefs)
+import SortDefs (MutualDefs)
 import Control.Monad.Except
     ( ExceptT,
       foldM,
