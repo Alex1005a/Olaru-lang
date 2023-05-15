@@ -25,10 +25,6 @@ type EnvDef = Map Name (Type, Modality)
 
 type Check = ExceptT TypeError (Reader EnvDef)
 
-throwFromMaybe :: TypeError -> Maybe a -> Check a
-throwFromMaybe _ (Just b) = pure b
-throwFromMaybe a Nothing = throwError a
-
 checkUsageCount :: Modality -> Name -> Usage -> Check ()
 checkUsageCount m name usage = do
     let countUsage = length $ filter (== name) usage
@@ -97,7 +93,7 @@ checkCase m (pat, caseExpr) locEnv = do
     newLocs <- case pat of
       ConstructorPattern conName args -> do
         conLookup <- asks $ lookup conName
-        (conTy, conM) <- throwFromMaybe (UnboundVariable conName) conLookup
+        (conTy, conM) <- maybe (throwError $ UnboundVariable conName) pure conLookup
         unless (more m conM) $ throwError (IncorrectModalityContext conName m conM)
         pure $ zip args $ funArgs conTy
       _ -> pure []
@@ -111,7 +107,7 @@ mcheck :: Modality -> LocalEnv -> Expr Type -> Check (Type, Usage, LocalEnv)
 mcheck m locEnv (NameExpr name) = do
     defLookup <- asks $ lookup name
     let lookupResult = ((, [name]) <$> lookup name locEnv) <|> ((, []) <$> defLookup)
-    ((ty, varM), usage) <- throwFromMaybe (UnboundVariable name) lookupResult
+    ((ty, varM), usage) <- maybe (throwError $ UnboundVariable name) pure lookupResult
     unless (more m varM) $ throwError (IncorrectModalityContext name m varM)
     pure (ty, usage, locEnv)
 mcheck m locEnv (ApplyExpr fun arg) = do
