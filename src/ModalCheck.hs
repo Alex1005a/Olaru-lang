@@ -16,7 +16,8 @@ import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
 import Data.Function (on)
 import Data.Bifunctor (second)
-import Control.Monad.State (State, modify, MonadState (get), evalState)
+import Control.Monad.State (State, modify, MonadState (get, put), evalState, withState)
+import Control.Monad.Trans (lift)
 
 type Usage = [Name]
 
@@ -131,12 +132,13 @@ mcheck _ (LambdaExpr argName argTy argM expr) = do
 mcheck _ (LitExpr l) = pure (litType l, [])
 mcheck m (CaseExpr matchExpr pats) = do
     (_, matchUsed) <- mcheck m matchExpr
-    caseCheckedWithTy <- traverse (checkCase m) pats
+    locEnv <- get
+    caseCheckedWithTy <- traverse (\pe -> put locEnv >> checkCase m pe) pats
     let ty = fst $ head caseCheckedWithTy
     let caseChecked = groupByFst $ concatMap snd caseCheckedWithTy
     newLocList <- mapM combineUsages caseChecked
     let newLoc = fromList $ second argUsageToModality <$> newLocList
-    modify (mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)))
+    put (mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)) locEnv)
     pure (ty, matchUsed)
 
 runMcheck :: [(Name, Expr Type, Scheme)] -> Either TypeError [(Type, Usage)]
