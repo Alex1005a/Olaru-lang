@@ -17,4 +17,4 @@ main = do
     let sortedDefs = sortDefs defs
     let tyCheckResult = fromRight (error "TypeCheck fail") $ runInferSeq (TypeEnv conMap `union` prims) sortedDefs
     print $ fromRight (error "ModalCheck fail") $ runMcheck tyCheckResult
-    print $ evalName "main" (Map.fromList defs, Map.map schemeArity conMap)
+    print $ evalName "main" (Map.fromList $ (\(n, e, _) -> (n, e)) <$> tyCheckResult) (Map.map schemeArity conMap)

@@ -6,20 +6,25 @@ import GHC.Generics (Generic)
 import Control.DeepSeq (NFData, deepseq)
 import Data.Map (Map, insert, lookup, empty, fromList, union)
 import Prelude hiding (lookup)
-import Data.Maybe (fromJust)
-import Control.Applicative ((<|>))
+import Control.Monad.Except (ExceptT, MonadError (throwError), runExceptT)
+import Control.Monad.Reader (Reader, asks, ask, runReader)
+import Types (Type)
 
 type ConstructorArity = Int
 
 type ConstructorMap = Map Name ConstructorArity
 
 type Env = Map Name Value
+type ExprMap = Map Name (Expr Type)
 
-type ExprMap a = Map Name (Expr a)
+data EvalError = IndalidValue | NoMatchingPatterns | UnboundName
+    deriving (Show, Eq)
+
+type Eval = ExceptT EvalError (Reader (ConstructorMap, ExprMap))
 
 data Value
   = LitVal Literal
-  | Closure (Value -> Value)
+  | Closure (Value -> Eval Value)
   | Constructor Name [Value]
   deriving (Generic, NFData)
 
@@ -35,7 +40,7 @@ instance Eq Value where
 
 createConstructorClosure :: [Value] -> Int -> Name -> Value
 createConstructorClosure vals 0 name = Constructor name vals
-createConstructorClosure vals n name = Closure $ \v -> createConstructorClosure (vals ++ [v]) (n - 1) name
+createConstructorClosure vals n name = Closure $ \v -> pure $ createConstructorClosure (vals ++ [v]) (n - 1) name
 
 constructorClosure :: Name -> ConstructorMap -> Maybe Value
 constructorClosure name constructs = do
@@ -43,10 +48,10 @@ constructorClosure name constructs = do
     pure $ createConstructorClosure [] info name
 
 integerClosure :: (Integer -> Integer -> Integer) -> Value
-integerClosure f = Closure $ \v1 -> Closure $ \v2 ->
+integerClosure f = Closure $ \v1 -> pure $ Closure $ \v2 ->
     case (v1, v2) of
-        (LitVal (IntegerLiteral int1), LitVal (IntegerLiteral int2)) -> LitVal $ IntegerLiteral (f int1 int2)
-        _ -> error "Not two int"
+        (LitVal (IntegerLiteral int1), LitVal (IntegerLiteral int2)) -> pure $ LitVal $ IntegerLiteral (f int1 int2)
+        _ -> throwError IndalidValue
 
 matchValues :: Value -> [(Pattern, Expr a)] -> ConstructorMap -> Maybe ([(Name, Value)], Expr a)
 matchValues _ ((Default, expr) : _) _ = Just ([], expr)
@@ -58,28 +63,34 @@ matchValues val@(Constructor nameConst vals) ((ConstructorPattern namePat names,
     else matchValues val rest constructs
 matchValues _ _ _ = Nothing
 
-eval :: Expr a -> (ExprMap a, ConstructorMap) -> Env -> Maybe Value
-eval (LitExpr lit) _ _ = Just $ LitVal lit
-eval (LambdaExpr arg _ _ expr) ast env = pure . Closure $ \v -> v `deepseq` fromJust $ eval expr ast (insert arg v env)
-eval (ApplyExpr f x) ast env = do
-    x_ <- eval x ast env
-    (Closure f_) <- eval f ast env
-    Just $ f_ x_
-eval (NameExpr "plus") _ _ = pure $ integerClosure (+)
-eval (NameExpr "mult") _ _ = pure $ integerClosure (*)
-eval (NameExpr "minus") _ _ = pure $ integerClosure (-)
-eval (NameExpr name) (exprs, constructs) env =
-    constructorClosure name constructs
-    <|> (do
-    expr <- lookup name exprs
-    eval expr (exprs, constructs) empty)
-    <|> lookup name env
-eval (CaseExpr expr patterns) (exprs, constructs) env = do
-    val <- eval expr (exprs, constructs) env
-    (vars, patExpr) <- matchValues val patterns constructs
-    eval patExpr (exprs, constructs) (fromList vars `union` env)
+eval :: Expr a -> Env -> Eval Value
+eval (LitExpr lit) _ = pure $ LitVal lit
+eval (LambdaExpr arg _ _ expr) env = pure . Closure $ \v -> v `deepseq` eval expr (insert arg v env)
+eval (ApplyExpr f x) env = do
+    x_ <- eval x env
+    f_ <- eval f env
+    case f_ of
+      (Closure f_) -> f_ x_
+      _ -> throwError IndalidValue
+eval (NameExpr "plus") _ = pure $ integerClosure (+)
+eval (NameExpr "mult") _ = pure $ integerClosure (*)
+eval (NameExpr "minus") _ = pure $ integerClosure (-)
+eval (NameExpr name) env = do
+    (constructs, exprs) <- ask
+    case constructorClosure name constructs of
+        Just con -> pure con
+        Nothing -> 
+            case lookup name exprs of
+                Just expr -> eval expr empty
+                Nothing -> maybe (throwError UnboundName) pure (lookup name env)
+eval (CaseExpr expr patterns) env = do
+    val <- eval expr env
+    constructs <- asks fst
+    case matchValues val patterns constructs of
+        Just (vars, patExpr) -> eval patExpr $ fromList vars `union` env
+        Nothing -> throwError NoMatchingPatterns
 
-evalName :: Name -> (ExprMap a, ConstructorMap) -> Maybe Value
-evalName name (exprs, constructs) = do
-    expr <- lookup name exprs
-    eval expr (exprs, constructs) empty
+evalName :: Name -> ExprMap -> ConstructorMap -> Either EvalError Value
+evalName name exprs constructs = do
+    expr <- maybe (throwError UnboundName) pure $ lookup name exprs
+    runReader (runExceptT (eval expr empty)) (constructs, exprs)
