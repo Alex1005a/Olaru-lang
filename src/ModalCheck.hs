@@ -16,8 +16,8 @@ import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
 import Data.Function (on)
 import Data.Bifunctor (second)
-import Control.Monad.State (State, modify, MonadState (get, put), evalState, withState)
-import Control.Monad.Trans (lift)
+import Control.Monad.State (State, modify, MonadState (get, put), evalState)
+import Desugar (ConstructorMap)
 
 type Usage = [Name]
 
@@ -141,10 +141,10 @@ mcheck m (CaseExpr matchExpr pats) = do
     put (mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)) locEnv)
     pure (ty, matchUsed)
 
-runMcheck :: [(Name, Expr Type, Scheme)] -> Either TypeError [(Type, Usage)]
-runMcheck defs =
+runMcheck :: ConstructorMap -> [(Name, Expr Type, Scheme)] -> Either TypeError [(Type, Usage)]
+runMcheck conMap defs =
   let envDef = fromList $ (\(n, _, Forall _ ty) -> (n, (ty, Unrestricted))) <$> defs in
   let checkDefs = mapM (mcheck Linear) ((\(_, exprTy, _) -> exprTy) <$> defs) in
   let TypeEnv primsModal = prims in
-    let primsModal' = Data.Map.map (\(Forall _ ty) -> (ty, Unrestricted)) primsModal in
-  evalState (runReaderT (runExceptT checkDefs) (primsModal' `union` envDef)) empty
+    let modalConAndPrims = Data.Map.map (\(Forall _ ty) -> (ty, Unrestricted)) $ primsModal `union` conMap in
+  evalState (runReaderT (runExceptT checkDefs) (modalConAndPrims `union` envDef)) empty

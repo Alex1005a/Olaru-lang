@@ -1,7 +1,7 @@
 module Parser where
 
 import Expressions (Pattern (..), Literal (CharLiteral, IntegerLiteral))
-import Text.Megaparsec (Parsec, (<|>), some, many, choice, sepBy, between, sepBy1, runParser, MonadParsec (eof))
+import Text.Megaparsec (Parsec, (<|>), some, many, choice, sepBy, between, sepBy1, runParser, MonadParsec (eof, try))
 import Data.Void (Void)
 import qualified Text.Megaparsec.Char.Lexer as L
 import Text.Megaparsec.Char (space1, letterChar, char, upperChar)
@@ -63,15 +63,15 @@ symbol :: String -> Parser String
 symbol = L.symbol sc
 
 constructorDefinition :: Parser ConstructorDefinition
-constructorDefinition = liftA2 ConstructorDefinition constructorName (many typeArgument)
+constructorDefinition = ConstructorDefinition <$> lexeme constructorName <*> many (lexeme typeArgument)
 
 typeArgument :: Parser Type
-typeArgument = namedType <|> singleType
+typeArgument = try singleType <|> namedType
   where
     namedType = (`CustomType` []) <$> typeName
 
 singleType :: Parser Type
-singleType = TypeVar <$> typeVar <|> PrimType <$> primType <|> parens typeExpr
+singleType = parens typeExpr <|> TypeVar <$> typeVar <|> PrimType <$> primType
   where
     primType
          =  (IntegerType <$ symbol "Int")
@@ -85,7 +85,7 @@ typeExpr = funType <|> baseType
       _ <- symbol "->"
       retTy <- parens $ lexeme typeExpr
       pure $ argTy ::-> retTy
-    baseType = singleType <|> customType
+    baseType = customType <|> singleType
     customType = liftA2 CustomType typeName (many $ lexeme typeArgument)
 
 startWithUpperChar :: Parser String
@@ -95,22 +95,22 @@ startWithUpperChar = do
   pure $ beginWithUpper ++ rest
 
 constructorName :: Parser ConstructorName
-constructorName = startWithUpperChar
+constructorName = lexeme startWithUpperChar
 
 typeName :: Parser TypeName
-typeName = startWithUpperChar
+typeName = lexeme startWithUpperChar
 
 literal :: Parser Literal
-literal = intLit <|> charLit
+literal = lexeme $ intLit <|> charLit
   where
     intLit = IntegerLiteral <$> L.decimal
     charLit = CharLiteral <$> apostrophed L.charLiteral
 
 varName :: Parser Name
-varName = some (letterChar <|> upperChar)
+varName = lexeme $ some (letterChar <|> upperChar)
 
 typeVar :: Parser TypeVar
-typeVar = some letterChar
+typeVar = lexeme $ some letterChar
 
 onePattern  :: Parser Pattern
 onePattern  = choice [litPat, conPat, wildcardPat]
@@ -129,7 +129,7 @@ apostrophed :: Parser a -> Parser a
 apostrophed = between (symbol "\'") (symbol "\'")
 
 expr :: Parser SugarExpr
-expr = choice [lambdaExpr, appExpr, caseExpr]
+expr = choice [caseExpr, lambdaExpr, appExpr]
 
 lambdaExpr :: Parser SugarExpr
 lambdaExpr =
@@ -140,8 +140,8 @@ lambdaExpr =
 caseExpr :: Parser SugarExpr
 caseExpr =
   CaseExpr
-    <$> (symbol "case" *> lexeme expr <* symbol "of")
-    <*> braces (sepBy ((,) <$> onePattern <* symbol "->" <*> expr) (symbol ";"))
+    <$> (symbol "case" *> parens expr <* symbol "of")
+    <*> braces (sepBy1 ((,) <$> onePattern <* symbol "->" <*> expr) (symbol ";"))
 
 appExpr :: Parser SugarExpr
 appExpr = do
@@ -161,11 +161,11 @@ valueDefinition :: Parser ValueDefinition
 valueDefinition = NameDefinition <$> lexeme varName <*> (symbol "=" *> expr)
 
 definition :: Parser Definition
-definition = fmap ValueDefinition valueDefinition <|> dataDefinition
+definition = dataDefinition <|> fmap ValueDefinition valueDefinition
   where
     dataDefinition =
       DataDefinition
-        <$> (symbol "data" *> typeName)
+        <$> (symbol "data" *> lexeme typeName)
         <*> many typeVar
         <*> (symbol "=" *> sepBy1 constructorDefinition (symbol "|"))
 
@@ -173,4 +173,4 @@ ast :: Parser AST
 ast = sepBy definition (symbol ";")
 
 astParse :: String -> Either () AST
-astParse source = first (const ()) $ runParser (lexeme $ ast <* eof) "" source
+astParse source = first (const ()) $ runParser (ast <* eof) "" source

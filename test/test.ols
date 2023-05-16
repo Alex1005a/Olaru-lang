@@ -1,0 +1,1 @@
+data List a = Cons a (List a) | Nil ; length = \x -> case (x) of { Cons g rest -> plus 1 (length rest) ; Nil -> 0 } ; main = length (Cons 1 (Cons 2 Nil))
