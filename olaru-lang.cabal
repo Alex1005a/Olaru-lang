@@ -40,6 +40,8 @@ library
     , containers
     , deepseq
     , megaparsec
+    , microlens
+    , microlens-th
     , mtl
   default-language: Haskell2010
 
@@ -55,6 +57,8 @@ executable olaru-lang-exe
     , containers
     , deepseq
     , megaparsec
+    , microlens
+    , microlens-th
     , mtl
     , olaru-lang
   default-language: Haskell2010
@@ -72,6 +76,8 @@ test-suite olaru-lang-test
     , containers
     , deepseq
     , megaparsec
+    , microlens
+    , microlens-th
     , mtl
     , olaru-lang
   default-language: Haskell2010

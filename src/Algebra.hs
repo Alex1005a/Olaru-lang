@@ -5,7 +5,7 @@ data Modality
     | Relevant
     | Affine
     | Linear
-    -- | Ordered
+    | Ordered
     | Zero
     deriving (Eq, Show, Ord)
 
@@ -17,6 +17,8 @@ more _ Unrestricted = True
 more ts1 ts2 = ts1 == ts2
 
 mult :: Modality -> Modality -> Modality
+mult Ordered _ = Ordered
+mult _ Ordered = Ordered
 mult Linear ts = ts
 mult ts Linear = ts
 mult Unrestricted _ = Unrestricted

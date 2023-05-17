@@ -45,6 +45,7 @@ data TypeError
   | UsageModality Name Modality Int
   | InconsistentUsage Name
   | ContructorPatArgsMismatch
+  | WrongOrder
   deriving (Show, Eq)
 
 closeOver :: (Subst, Type) -> Scheme

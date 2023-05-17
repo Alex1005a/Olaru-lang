@@ -13,6 +13,8 @@ dependencies:
 - deepseq
 - mtl
 - megaparsec
+- microlens
+- microlens-th
 
 ghc-options:
 - -Wall
