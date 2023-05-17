@@ -1,1 +1,5 @@
-data List a = Cons a (List a) | Nil ; length = \x -> case (x) of { Cons g rest -> plus 1 (length rest) ; Nil -> 0 } ; main = length (Cons 1 (Cons 2 Nil))
+data List a = Cons a (List a) | Nil;
+map = \f -> \arr -> case (arr) of { Nil -> Nil ; Cons x xs -> Cons (f x) (map f xs) };
+length = \x -> case (x) of { Cons g rest -> plus 1 (length rest) ; Nil -> 0 };
+foo = \x -> map (\y -> plus x y);
+main = foo 2 (Cons 1 (Cons 2 Nil))

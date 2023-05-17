@@ -90,7 +90,7 @@ locsArgUsage name m used = do
         when (countUsage /= 0) $ throwError usageErr
         pure Use0
 
-checkCase :: Modality -> (Pattern, Expr Type) -> Check (Type, [(Name, ArgUsage)])
+checkCase :: Modality -> (Pattern, Expr Scheme) -> Check (Type, [(Name, ArgUsage)])
 checkCase m (pat, caseExpr)  = do
     newLocs <- case pat of
       ConstructorPattern conName args -> do
@@ -107,7 +107,7 @@ checkCase m (pat, caseExpr)  = do
       $ filter (`notElem` newLocs) $ toList newLocEnv
     pure (ty, argUsage)
 
-mcheck :: Modality -> Expr Type -> Check (Type, Usage)
+mcheck :: Modality -> Expr Scheme -> Check (Type, Usage)
 mcheck m (NameExpr name) = do
     defLookup <- asks $ lookup name
     locEnv <- get
@@ -122,7 +122,7 @@ mcheck m (ApplyExpr fun arg) = do
             (_, argUsed) <- mcheck (mult am m) arg
             pure (retTy, funUsed ++ argUsed)
         _ -> throwError ApplicationToNonFunction
-mcheck _ (LambdaExpr argName argTy argM expr) = do
+mcheck _ (LambdaExpr argName (Forall _ argTy) argM expr) = do
     modify (insert argName (argTy, argM))
     (retTy, used) <- mcheck argM expr
     locEnv <- get
@@ -141,7 +141,7 @@ mcheck m (CaseExpr matchExpr pats) = do
     put (mapWithKey (\n (t, _) -> (t, fromJust $ lookup n newLoc)) locEnv)
     pure (ty, matchUsed)
 
-runMcheck :: ConstructorMap -> [(Name, Expr Type, Scheme)] -> Either TypeError [(Type, Usage)]
+runMcheck :: ConstructorMap -> [(Name, Expr Scheme, Scheme)] -> Either TypeError [(Type, Usage)]
 runMcheck conMap defs =
   let envDef = fromList $ (\(n, _, Forall _ ty) -> (n, (ty, Unrestricted))) <$> defs in
   let checkDefs = mapM (mcheck Linear) ((\(_, exprTy, _) -> exprTy) <$> defs) in

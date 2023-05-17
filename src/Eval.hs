@@ -8,14 +8,14 @@ import Data.Map (Map, insert, lookup, empty, fromList, union)
 import Prelude hiding (lookup)
 import Control.Monad.Except (ExceptT, MonadError (throwError), runExceptT)
 import Control.Monad.Reader (Reader, asks, ask, runReader)
-import Types (Type)
+import TypeCheck (Scheme)
 
 type ConstructorArity = Int
 
 type ConstructorMap = Map Name ConstructorArity
 
 type Env = Map Name Value
-type ExprMap = Map Name (Expr Type)
+type ExprMap = Map Name (Expr Scheme)
 
 data EvalError = IndalidValue | NoMatchingPatterns | UnboundName
     deriving (Show, Eq)

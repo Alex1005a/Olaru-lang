@@ -47,11 +47,6 @@ data TypeError
   | ContructorPatArgsMismatch
   deriving (Show, Eq)
 
-runInfer :: Infer (Expr Type, Type) -> Either TypeError (Expr Type, Scheme)
-runInfer m = case runState (runExceptT m) (nullSubst, initUnique) of
-  (Left err, _)  -> Left err
-  (Right (exprTy, ty), (s, _)) -> Right (exprTy, closeOver (s, ty))
-
 closeOver :: (Subst, Type) -> Scheme
 closeOver (sub, ty) = normalize $ apply sub ty
 
@@ -243,10 +238,22 @@ prims = TypeEnv $ Map.fromList
     ("False", Forall [] $ CustomType "Bool" [])
   ]
 
-inferExpr :: TypeEnv -> Expr () -> Either TypeError (Expr Type, Scheme)
-inferExpr env = runInfer . infer env
+typeScheme :: TypeEnv -> Expr Type -> Infer (Expr Scheme)
+typeScheme env expr = case expr of
+  LitExpr litt -> return (LitExpr litt)
+  NameExpr n -> return (NameExpr n)
+  ApplyExpr e1 e2 -> ApplyExpr <$> typeScheme env e1 <*> typeScheme env e2
+  LambdaExpr n ty m retExpr -> do
+    s <- getSubst
+    let sch = generalize env (apply s ty)
+    exprSh <- typeScheme (env `extend` (n, sch)) retExpr
+    return (LambdaExpr n sch m exprSh)
+  CaseExpr e patDefs -> CaseExpr <$> typeScheme env e <*> forM patDefs (schemePatternDef env)
 
-inferTop :: TypeEnv -> [(Name, Expr ())] -> Infer [(Name, Expr Type, Type)]
+schemePatternDef :: TypeEnv -> (Pattern, Expr Type) -> Infer (Pattern, Expr Scheme)
+schemePatternDef env (pat, expr) = (pat,) <$> typeScheme env expr
+
+inferTop :: TypeEnv -> [(Name, Expr ())] -> Infer [(Name, Expr Scheme, Type)]
 inferTop env defs = do
   ts <- mapM (const fresh) defs
   let scs = map (Forall []) ts
@@ -256,16 +263,17 @@ inferTop env defs = do
   inferResult <- mapM (infer extEnv) exprs
   let (typesExprs, types) = unzip inferResult
   zipWithM_ unify ts types
-  pure $ zip3 is typesExprs types
+  schExprs <- traverse (typeScheme extEnv) typesExprs
+  pure $ zip3 is schExprs types
 
-runInferMutualTop :: TypeEnv -> MutualDefs () -> Either TypeError [(Name, Expr Type, Scheme)]
+runInferMutualTop :: TypeEnv -> MutualDefs () -> Either TypeError [(Name, Expr Scheme, Scheme)]
 runInferMutualTop env defs = do
   let inferDefs = inferTop env defs
   case runState (runExceptT inferDefs) (nullSubst, initUnique) of
     (Left err, _)  -> Left err
     (Right defsSchemed, (s, _)) -> Right ((\(n, exprTy, ty) -> (n, exprTy, closeOver (s, ty))) <$> defsSchemed)
 
-runInferSeq :: TypeEnv -> [MutualDefs ()] -> Either TypeError [(Name, Expr Type, Scheme)]
+runInferSeq :: TypeEnv -> [MutualDefs ()] -> Either TypeError [(Name, Expr Scheme, Scheme)]
 runInferSeq env (defs : rest) = do
   types <- runInferMutualTop env defs
   restTypes <- runInferSeq (env `union` TypeEnv (Map.fromList ((\(n, _, sch) -> (n, sch)) <$> types))) rest

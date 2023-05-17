@@ -4,7 +4,7 @@ import Expressions (Pattern (..), Literal (CharLiteral, IntegerLiteral))
 import Text.Megaparsec (Parsec, (<|>), some, many, choice, sepBy, between, sepBy1, runParser, MonadParsec (eof, try))
 import Data.Void (Void)
 import qualified Text.Megaparsec.Char.Lexer as L
-import Text.Megaparsec.Char (space1, letterChar, char, upperChar)
+import Text.Megaparsec.Char (space1, letterChar, char, upperChar, newline)
 import Types (PrimType (CharType, IntegerType))
 import Control.Applicative (liftA2)
 import Data.Bifunctor (first)
