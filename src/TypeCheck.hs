@@ -110,7 +110,7 @@ compose :: Subst -> Subst -> Subst
 s1 `compose` s2 = Map.map (apply s1) s2 `Map.union` s1
 
 mgu :: (Monad a) => Type -> Type -> ExceptT TypeError a Subst
-mgu ((m, argTy) :-> retTy) ((m', argTy') :-> retTy') | m == m' = do
+mgu ((_, argTy) :-> retTy) ((_, argTy') :-> retTy') = do
   s1 <- mgu argTy argTy'
   s2 <- mgu (apply s1 retTy) (apply s1 retTy')
   pure (s2 `compose` s1)

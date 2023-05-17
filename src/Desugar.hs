@@ -24,7 +24,7 @@ desugarExpr (P.NameExpr name) = NameExpr name
 desugarExpr (P.LitExpr litt) = LitExpr litt
 desugarExpr (P.LambdaExpr args sexpr) = do
   let expr = desugarExpr sexpr in
-    foldr (\arg -> LambdaExpr arg () Unrestricted) expr args
+    foldr (\(arg, m) -> LambdaExpr arg () m) expr args
 desugarExpr (P.ApplyExpr fun args) = do
   let funExpr = desugarExpr fun
       argExprs = desugarExpr <$> args in

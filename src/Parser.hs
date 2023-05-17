@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 module Parser where
 
 import Expressions (Pattern (..), Literal (CharLiteral, IntegerLiteral))
@@ -8,6 +9,8 @@ import Text.Megaparsec.Char (space1, letterChar, char, upperChar, newline)
 import Types (PrimType (CharType, IntegerType))
 import Control.Applicative (liftA2)
 import Data.Bifunctor (first)
+import Algebra (Modality (Unrestricted, Linear, Relevant, Affine))
+import Data.Tuple (swap)
 
 type Parser = Parsec Void String
 
@@ -43,7 +46,7 @@ data ValueDefinition = NameDefinition ValName SugarExpr
   deriving (Eq, Show)
 
 data SugarExpr
-  = LambdaExpr [ValName] SugarExpr
+  = LambdaExpr [(ValName, Modality)] SugarExpr
   | NameExpr Name
   | LitExpr Literal
   | ApplyExpr SugarExpr [SugarExpr]
@@ -112,12 +115,19 @@ varName = lexeme $ some (letterChar <|> upperChar)
 typeVar :: Parser TypeVar
 typeVar = lexeme $ some letterChar
 
+modality :: Parser Modality
+modality = choice [linMod, relMod, affMod]
+  where
+    linMod = Linear <$ symbol "1"
+    relMod = Relevant <$ symbol "r"
+    affMod = Affine <$ symbol "a"
+
 onePattern  :: Parser Pattern
 onePattern  = choice [litPat, conPat, wildcardPat]
   where
     litPat = LiteralPattern <$> lexeme literal
     conPat = ConstructorPattern <$> constructorName <*> many (lexeme varName)
-    wildcardPat = Default <$ char '_'
+    wildcardPat = Default <$ symbol "_"
 
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
@@ -134,7 +144,7 @@ expr = choice [caseExpr, lambdaExpr, appExpr]
 lambdaExpr :: Parser SugarExpr
 lambdaExpr =
   LambdaExpr
-    <$> (symbol "\\" *> lexeme (some varName) <* symbol "->")
+    <$> (symbol "\\" *> lexeme (some $ parens ((\m n -> (n, m)) <$> modality <*> varName) <|> ((, Unrestricted) <$> varName)) <* symbol "->")
     <*> expr
 
 caseExpr :: Parser SugarExpr
